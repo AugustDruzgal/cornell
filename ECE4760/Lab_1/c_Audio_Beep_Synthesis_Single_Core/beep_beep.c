@@ -28,6 +28,9 @@
 #define ALARM_NUM 0
 #define ALARM_IRQ TIMER_IRQ_0
 
+/**
+ * Used to track the state of the keypad
+ */
 typedef enum _keypad_state {
     KEYPAD_NOT_PRESSED,
     KEYPAD_MAYBE_PRESSED,
@@ -35,11 +38,34 @@ typedef enum _keypad_state {
     KEYPAD_MAYBE_NOT_PRESSED
 } keypad_state;
 
+/**
+ * Used to track the current sound, and record previous sounds
+ */
 typedef enum _sound {
     SOUND_CHIRP,
     SOUND_SWOOP,
-    SOUND_BEEP
+    SOUND_SILENCE,
+    SOUND_BIRD_NOISE_1,
+    SOUND_BIRD_NOISE_2,
+    SOUND_BIRD_NOISE_3,
+    SOUND_NONE
 } sound;
+
+/**
+ * Used to track the playback mode
+ */
+typedef enum _playback_mode {
+    MODE_RECORD,
+    MODE_PLAY
+} playback_mode;
+
+/**
+ * Used to record the played audio
+ */
+typedef struct _recorded_sound {
+    sound sound;
+    uint32_t timestamp;
+} recorded_sound;
 
 // Macros for fixed-point arithmetic (faster than floating point)
 typedef signed int fix15;
@@ -66,8 +92,21 @@ volatile unsigned int phase_incr_main_0 = (400.0*two32)/Fs;
 #define sine_table_size 256
 fix15 sin_table[sine_table_size];
 #define SWOOP_LEN 6500
+#define CHIRP_LEN 6500
+#define SILENCE_LEN 3000
+#define BIRD_NOISE_1_LEN 10000
+#define BIRD_NOISE_2_LEN 5000
+#define BIRD_NOISE_3_LEN 3112
 static fix15 swoop[SWOOP_LEN] = {0};
-static fix15 chirp[SWOOP_LEN] = {0};
+static fix15 chirp[CHIRP_LEN] = {0};
+static fix15 silence[SILENCE_LEN] = {0};
+static fix15 bird_noise_1[BIRD_NOISE_1_LEN] = {0};
+static fix15 bird_noise_2[BIRD_NOISE_2_LEN] = {0};
+static fix15 bird_noise_3[BIRD_NOISE_3_LEN] = {0};
+static recorded_sound recorded_sounds[256];
+static uint32_t recorded_sounds_len = 0;
+static uint32_t record_playback_index = 0;
+static playback_mode mode = MODE_PLAY;
 
 // Values output to DAC
 int DAC_output_0;
@@ -88,7 +127,7 @@ fix15 current_amplitude_1 = 0;         // current amplitude (modified in ISR)
 #define BEEP_REPEAT_INTERVAL    50000
 
 // State machine variables
-volatile unsigned int STATE_0 = 0;
+volatile unsigned int STATE_0 = 1;
 volatile unsigned int count_0 = 0;
 static sound current_sound;
 
@@ -120,6 +159,69 @@ uint16_t DAC_data_0; // output value
 
 #define BASE_KEYPAD_PIN 9
 
+/**
+ * Return the length of the input sound, measured in interrupts
+ */
+inline uint32_t sound_length(sound sound)
+{
+    switch (sound)
+    {
+        case SOUND_CHIRP:
+            return CHIRP_LEN;
+        case SOUND_SWOOP:
+            return SWOOP_LEN;
+        case SOUND_SILENCE:
+            return SILENCE_LEN;
+        case SOUND_BIRD_NOISE_1:
+            return BIRD_NOISE_1_LEN;
+        case SOUND_BIRD_NOISE_2:
+            return BIRD_NOISE_2_LEN;
+        case SOUND_BIRD_NOISE_3:
+            return BIRD_NOISE_3_LEN;
+        case SOUND_NONE:
+            return 0;
+        default:
+            return SWOOP_LEN;
+    }
+}
+
+/**
+ * Return the DDS increment based on the sound and frequency index for the sound
+ */
+static int increment_from_sound(sound sound, int count)
+{
+    fix15 *frequencies;
+
+    switch (sound)
+    {
+        case SOUND_CHIRP:
+            frequencies = chirp;
+            break;
+        case SOUND_SWOOP:
+            frequencies = swoop;
+            break;
+        case SOUND_SILENCE:
+            frequencies = silence;
+            break;
+        case SOUND_BIRD_NOISE_1:
+            frequencies = bird_noise_1;
+            break;
+        case SOUND_BIRD_NOISE_2:
+            frequencies = bird_noise_2;
+            break;
+        case SOUND_BIRD_NOISE_3:
+            frequencies = bird_noise_3;
+            break;
+        case SOUND_NONE:
+            frequencies = swoop;
+            break;
+        
+    }
+
+    // Access the sound's frequency table based on the frequency index
+    return (int) (((uint32_t) fix2int15(frequencies[count])) * (two32/Fs));
+}
+
 // This timer ISR is called on core 0
 static void alarm_irq(void) 
 {
@@ -138,17 +240,7 @@ static void alarm_irq(void)
         
         int DDS_increment;
 
-        switch (current_sound)
-        {
-            case SOUND_CHIRP:
-                DDS_increment = (int) (((uint32_t) fix2int15(chirp[count_0])) * (two32/Fs));
-                break;
-
-            case SOUND_SWOOP:
-            default:
-                DDS_increment = (int) (((uint32_t) fix2int15(swoop[count_0])) * (two32/Fs));
-                break;
-        }
+        DDS_increment = increment_from_sound(current_sound, count_0);
 
         phase_accum_main_0 += DDS_increment;
 
@@ -163,7 +255,7 @@ static void alarm_irq(void)
             current_amplitude_0 = (current_amplitude_0 + attack_inc);
         }
         // Ramp down amplitude
-        else if (count_0 > BEEP_DURATION - DECAY_TIME) 
+        else if (count_0 > sound_length(current_sound) - DECAY_TIME) 
         {
             current_amplitude_0 = (current_amplitude_0 - decay_inc);
         }
@@ -178,22 +270,31 @@ static void alarm_irq(void)
         count_0 += 1;
 
         // State transition?
-        if (count_0 == SWOOP_LEN) 
+        if (count_0 == sound_length(current_sound)) 
         {
-            STATE_0 = 1;
-            count_0 = 0;
-        }
-    }
+            if (mode == MODE_RECORD)
+            {
+                STATE_0 = 1;
+                count_0 = 0;
+            }
+            else
+            {
+                // If there are more recorded sounds, play the next one
+                if (++record_playback_index < recorded_sounds_len)
+                {
+                    current_sound = recorded_sounds[record_playback_index].sound;
+                    STATE_0 = 0;
+                }
+                else
+                {
+                    STATE_0 = 1;
+                }
 
-    // State transition?
-    else {
-        /* count_0 += 1;
-        if (count_0 == BEEP_REPEAT_INTERVAL) 
-        {
-            current_amplitude_0 = 0;
-            STATE_0 = 0;
-            count_0 = 0;
-        }*/
+                phase_accum_main_0 = 0;
+                current_amplitude_0 = 0;
+                count_0 = 0;
+            }
+        }
     }
 
     // De-assert the GPIO when we leave the interrupt
@@ -201,6 +302,7 @@ static void alarm_irq(void)
 
 }
 
+// Returns the currently pressed key, or -1 if the keypad is in an invalid state
 static int get_pressed_key()
 {
     unsigned int keycodes[NUMKEYS] = {   0x28, 0x11, 0x21, 0x41, 0x12,
@@ -255,8 +357,10 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
 
         int key = get_pressed_key();
 
+        // The keypad state machine
         switch (state)
         {
+            // If in "not pressed" and a key is pressed, switch to "maybe pressed"
             case KEYPAD_NOT_PRESSED:
                 if (key == -1)
                 {
@@ -267,7 +371,11 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
                     state = KEYPAD_MAYBE_PRESSED;
                 }
                 break;
-                
+            
+            /**
+             * If in "maybe pressed" and a key is pressed, switch to "pressed". Otherwise, switch to "not pressed"
+             * When switching to pressed, handle the key press.
+             */ 
             case KEYPAD_MAYBE_PRESSED:
                 if (key == -1)
                 {
@@ -279,6 +387,17 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
 
                     printf("pressed key: %d\n", key);
 
+                    /**
+                     * Handle the key press:
+                     * 
+                     * 1 - play "swoop"
+                     * 2 - play "chirp"
+                     * 3 - play "silence"
+                     * 6 - play "bird noise 1"
+                     * 6 - play "bird noise 2"
+                     * 6 - play "bird noise 3"
+                     * 0 - switch modes
+                     */
                     switch (key)
                     {
                         case 1:
@@ -287,18 +406,63 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
                         case 2:
                             current_sound = SOUND_CHIRP;
                             break;
+                        case 3:
+                            current_sound = SOUND_SILENCE;
+                            break;
+                        case 4:
+                            current_sound = SOUND_BIRD_NOISE_1;
+                            break;
+                        case 5:
+                            current_sound = SOUND_BIRD_NOISE_2;
+                            break;
+                        case 6:
+                            current_sound = SOUND_BIRD_NOISE_3;
+                            break;
+                        case 0:
+                            mode = (mode == MODE_PLAY) ? MODE_RECORD : MODE_PLAY;
+
+                            printf("Mode changed to %s mode\n", mode == MODE_PLAY ? "play" : "record");
+
+                            // Reset DDS and start playback when switching to play mode
+                            if (mode == MODE_PLAY)
+                            {
+                                record_playback_index = 0;
+                                current_sound = recorded_sounds[0].sound;
+                                phase_accum_main_0 = 0;
+                                current_amplitude_0 = 0;
+                                STATE_0 = 0;
+                                count_0 = 0;
+                            }
+                            else
+                            {
+                                recorded_sounds_len = 0;
+                            }
+
+                            break; 
+
                         default:
-                            current_sound = SOUND_BEEP;
+                            current_sound = SOUND_SILENCE;
                             break;
                     }
 
-                    phase_accum_main_0 = 0;
-                    current_amplitude_0 = 0;
-                    STATE_0 = 0;
-                    count_0 = 0;
+                    // If pressing a sound key, reset DDS
+                    if (key != 0)
+                    {
+                        phase_accum_main_0 = 0;
+                        current_amplitude_0 = 0;
+                        STATE_0 = 0;
+                        count_0 = 0;
+
+                        if (mode == MODE_RECORD)
+                        {
+                            recorded_sounds[recorded_sounds_len++].sound = current_sound;
+                            // recorded_sounds[recorded_sounds_len].timestamp = current_sound;
+                        }
+                    }
                 }
                 break;
-
+            
+            // If in "pressed" and no key is pressed, switch to "maybe not pressed"
             case KEYPAD_PRESSED:
                 if (key == -1)
                 {
@@ -310,6 +474,8 @@ static PT_THREAD (protothread_core_0(struct pt *pt))
                 }
                 
                 break;
+            
+            // If in "maybe not pressed" and no key is pressed, switch to "not pressed". Otherwise, switch back to pressed.
             case KEYPAD_MAYBE_NOT_PRESSED:
                 if (key == -1)
                 {
@@ -384,18 +550,52 @@ int main()
 
     // Build the sine lookup table
     // scaled to produce values between 0 and 4096 (for 12-bit DAC)
-    int ii;
-    for (ii = 0; ii < sine_table_size; ii++){
-         sin_table[ii] = float2fix15(2047*sin((float)ii*6.283/(float)sine_table_size));
+    int x;
+    for (x = 0; x < sine_table_size; x++)
+    {
+         sin_table[x] = float2fix15(2047*sin((float)x*6.283/(float)sine_table_size));
     }
 
-    for (ii = 0; ii < SWOOP_LEN; ii++)
+    // Create a frequency table for swoop
+    for (x = 0; x < SWOOP_LEN; x++)
     {
-        float frequency = (-260 * (float) sin((((float) -3.141592)/((float)SWOOP_LEN))*ii)) + 1740;
-        swoop[ii] = float2fix15(frequency);
+        float frequency = (-260 * (float) sin((((float) -3.141592)/((float)SWOOP_LEN))*x)) + 1740;
+        swoop[x] = float2fix15(frequency);
+    }
 
-        frequency = .000184 * ii * ii + 2000;
-        chirp[ii] = float2fix15(frequency);
+    // Create a frequency table for chirp
+    for (x = 0; x < CHIRP_LEN; x++)
+    {
+        float frequency = .000184 * x * x + 2000;
+        chirp[x] = float2fix15(frequency);
+    }
+
+    // Create a frequency table for silence
+    for (x = 0; x < SILENCE_LEN; x++)
+    {
+        float frequency = 0;
+        silence[x] = float2fix15(frequency);
+    }
+
+    // Create a frequency table for bird noise 1
+    for (x = 0; x < BIRD_NOISE_1_LEN; x++)
+    {
+        float frequency = 2750 + (0.0066 * (x - 11000)) * (0.0066 * (x - 11000));
+        bird_noise_1[x] = float2fix15(frequency);
+    }
+
+    // Create a frequency table for bird noise 2
+    for (x = 0; x < BIRD_NOISE_2_LEN; x++)
+    {
+        float frequency = 2600 - 0.1 * x;
+        bird_noise_2[x] = float2fix15(frequency);
+    }
+
+    // Create a frequency table for bird noise 3
+    for (x = 0; x < BIRD_NOISE_3_LEN; x++)
+    {
+        float frequency = -0.0003238 * (x - 1556) * (x - 1556) + 2000;
+        bird_noise_3[x] = float2fix15(frequency);
     }
 
     // Enable the interrupt for the alarm (we're using Alarm 0)
