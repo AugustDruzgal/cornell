@@ -38,6 +38,7 @@
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
+#include "hardware/adc.h"
 // Include protothreads
 #include "pt_cornell_rp2040_v1_4.h"
 
@@ -52,13 +53,13 @@ typedef signed int fix15;
 #define char2fix15(a) (fix15)(((fix15)(a)) << 15)
 #define divfix(a,b) (fix15)(div_s64s64( (((signed long long)(a)) << 15), ((signed long long)(b))))
 
-#define SCREEN_TOP_Y 40
-#define SCREEN_BOTTOM_Y 440
-#define SCREEN_LEFT_X 40
-#define SCREEN_RIGHT_X 620
+#define SCREEN_TOP_Y 5
+#define SCREEN_BOTTOM_Y 475
+#define SCREEN_LEFT_X 5
+#define SCREEN_RIGHT_X 635
 
 // Wall detection
-#define hitBottom(b) (b>int2fix15(SCREEN_BOTTOM_Y))
+#define hitBottom(b) (b>int2fix15(GALTON_BOTTOM_Y))
 #define hitTop(b) (b<int2fix15(SCREEN_TOP_Y))
 #define hitLeft(a) (a<int2fix15(SCREEN_LEFT_X))
 #define hitRight(a) (a>int2fix15(SCREEN_RIGHT_X))
@@ -82,26 +83,38 @@ typedef struct _peg {
 	fix15 y;
 } peg_t;
 
+#define MIN_BALLS 1
 #define MAX_BALLS 256
-#define BALL_RADIUS 4
-#define BALL_BOUNCINESS 0.5f
+#define BALL_RADIUS 2
+#define BALL_BOUNCINESS 0.45f
 #define BALL_GRAVITY 0.75f
 #define BALL_START_DX_MAX 1.0f
 #define BALL_START_X 320
-#define BALL_START_Y 120
-#define BALLS_COUNT 10
+#define BALL_START_Y 25
 static ball_t balls[MAX_BALLS];
 static int balls_len = 0;
 
 #define GALTON_HEIGHT 16
+#define GALTON_MAX_HEIGHT 16
 #define GALTON_H_SEPARATION 38
 #define GALTON_V_SEPARATION 19
-#define GALTON_TOP_Y 150
+#define GALTON_TOP_Y 50
+#define GALTON_BOTTOM_Y GALTON_TOP_Y + (GALTON_HEIGHT - 1) * GALTON_V_SEPARATION + PEG_RADIUS
 
-#define MAX_PEGS 256
+#define GRAPH_LEN GALTON_HEIGHT + 1
+#define GRAPH_START_Y SCREEN_BOTTOM_Y
+#define GRAPH_MAX_Y   GALTON_BOTTOM_Y + 10
+#define GRAPH_BAR_WIDTH 30
+
+#define MAX_PEGS GALTON_MAX_HEIGHT * GALTON_MAX_HEIGHT
 #define PEG_RADIUS 6
+
 static peg_t pegs[MAX_PEGS];
 static int pegs_len = 0;
+static uint32_t graph[GRAPH_LEN];
+
+static float time_since_boot = 0;
+static uint32_t num_fallen_through = 0;
 
 // Number of samples per period in sine table
 #define sine_table_size 256
@@ -128,8 +141,20 @@ static int ctrl_chan;
 #define PIN_CS   5
 #define SPI_PORT spi0
 
+#define PIN_POT 27
+#define POT_MAX 4000
+#define POT_MIN_DEVIATION 20
+
+static bool num_balls_set = true;
+static int pot_last_value = 0;
+
 // Number of DMA transfers per event
 const uint32_t transfer_count = sine_table_size;
+
+uint16_t readPotentiometer()
+{
+	return adc_read();
+}
 
 void resetBall(ball_t *ball)
 {
@@ -151,9 +176,119 @@ void spawnball(void)
 	resetBall(ball);
 }
 
+void removeball(ball_t *ball)
+{
+	fillCircle(fix2int15(ball->x), fix2int15(ball->y), BALL_RADIUS, BLACK);
+}
+
+void setNumBalls(uint32_t num_balls)
+{
+	if (num_balls > MAX_BALLS)
+	{
+		num_balls = MAX_BALLS;
+	}
+
+	if (balls_len < num_balls)
+	{
+		for (int i = balls_len; i < num_balls; i++)
+		{
+			spawnball();
+		}
+	}
+	else if (balls_len > num_balls)
+	{
+		balls_len = num_balls;
+	}
+
+}
+
+void update_potentiometer(void)
+{
+	uint16_t pot_value = readPotentiometer();
+
+	if (abs(pot_last_value - (int)pot_value) < POT_MIN_DEVIATION)
+	{
+		return;
+	}
+
+	pot_last_value = pot_value;
+
+	if (pot_value > POT_MAX)
+	{
+		pot_value = POT_MAX;
+	}
+
+	pot_value = (int) (((float) pot_value / (float) POT_MAX) * ((float) MAX_BALLS));
+	
+	setNumBalls(pot_value);
+}
+
 void play_hit_sound(void)
 {
 	dma_channel_start(ctrl_chan);
+}
+
+void resetGraph(void)
+{
+	for (int i = 0; i < GRAPH_LEN; i++)
+	{
+		graph[i] = 0;
+	}
+
+	num_fallen_through = 0;
+}
+
+void updateGraph(ball_t *ball)
+{
+	int startx = 320 - (int) (((float) (GALTON_HEIGHT-1))/2.0 * GALTON_H_SEPARATION);
+	int x = fix2int15(ball->x);
+
+	if (x <= startx)
+	{
+		graph[0]++;
+		return;
+	}
+
+	for (int j = 0; j <= GALTON_HEIGHT; j++)
+	{
+		if (x <= startx + j * GALTON_H_SEPARATION)
+		{
+			graph[j + 1]++;
+			return;
+		}
+	}
+
+	graph[GALTON_HEIGHT]++;
+}
+
+void drawGraph(void)
+{
+	int start_x = 320 - (int) (((float) (GALTON_HEIGHT + 2))/2.0 * GALTON_H_SEPARATION);
+	int graph_max = 1;
+	float proportion;
+	int graph_height;
+
+	for (int i = 0; i < GRAPH_LEN; i++)
+	{
+		if (graph[i] > graph_max)
+		{
+			graph_max = graph[i];
+		}
+	}
+
+	for (int i = 0; i < GRAPH_LEN; i++)
+	{
+		if (graph[i] <= 0)
+		{
+			continue;
+		}
+
+		// proportion = ((float) graph[i] / (float) graph_max);
+		// graph_height = (int) (proportion * (float) (GRAPH_START_Y - GALTON_BOTTOM_Y));
+		graph_height = (int) ((((float) graph[i]) / ((float) graph_max)) * 100);
+		fillRect(start_x + i * GALTON_H_SEPARATION - GRAPH_BAR_WIDTH/2, GRAPH_START_Y - 100, GRAPH_BAR_WIDTH, 100, BLACK);
+		fillRect(start_x + i * GALTON_H_SEPARATION - GRAPH_BAR_WIDTH/2, GRAPH_START_Y - graph_height, GRAPH_BAR_WIDTH, graph_height, RED);
+	}
 }
 
 void updateBall(ball_t *ball)
@@ -207,6 +342,8 @@ void updateBall(ball_t *ball)
 
 	if (hitBottom(ball->y))
 	{
+		updateGraph(ball);
+		num_fallen_through++;
 		resetBall(ball);
 	}
 
@@ -258,12 +395,28 @@ void createGalton()
 }
 
 // Draw the boundaries
-void drawArena() 
+void drawBoard() 
 {
+	for (int i = 0; i < pegs_len; i++)
+	{
+		fillCircle(fix2int15(pegs[i].x), fix2int15(pegs[i].y), 6, BLUE);
+	}
+
 	drawVLine(SCREEN_RIGHT_X, SCREEN_TOP_Y, SCREEN_BOTTOM_Y - SCREEN_TOP_Y, WHITE);
 	drawVLine(SCREEN_LEFT_X, SCREEN_TOP_Y, SCREEN_BOTTOM_Y - SCREEN_TOP_Y, WHITE);
 	drawHLine(SCREEN_LEFT_X, SCREEN_BOTTOM_Y, SCREEN_RIGHT_X - SCREEN_LEFT_X, WHITE);
 	drawHLine(SCREEN_LEFT_X, SCREEN_TOP_Y, SCREEN_RIGHT_X - SCREEN_LEFT_X, WHITE);
+
+	setCursor(10, 10);
+	setTextSize(1);
+	setTextColor2(WHITE, BLACK);
+	
+	static char str[256];
+
+	sprintf(str, "Ball count:       %lu    \nFallen through:   %lu\nTime since boot:  %us", balls_len, num_fallen_through, (int) time_since_boot);
+
+	// fillRect(10, 10, 200, 100, BLACK);
+	writeString(str);
 }
 
 // ==================================================
@@ -313,7 +466,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 	static int begin_time;
 	static int spare_time;
 
-	for (int i = 0; i < BALLS_COUNT; i++)
+	for (int i = 0; i < MIN_BALLS; i++)
 	{
 		spawnball();
 	}
@@ -325,30 +478,40 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 	{
 		// TODO: handle multiple balls and pegs
 		// Measure time at start of thread
-		begin_time = time_us_32();      
+		begin_time = time_us_32();    
+		
+		// clearLowFrame(0, BLACK);
+
 
 		for (int i = 0; i < balls_len; i++)
 		{
 			// erase ball
-			drawCircle(fix2int15(balls[i].x), fix2int15(balls[i].y), 4, BLACK);
-			// update ball's position and velocity, check for peg hits
-			updateBall(&balls[i]);
-			// draw the ball at its new position
-			drawCircle(fix2int15(balls[i].x), fix2int15(balls[i].y), 4, color);
+			fillCircle(fix2int15(balls[i].x), fix2int15(balls[i].y), BALL_RADIUS, BLACK);
 		}
 
-		for (int i = 0; i < pegs_len; i++)
+		update_potentiometer();
+		
+		for (int i = 0; i < balls_len; i++)
 		{
-			drawCircle(fix2int15(pegs[i].x), fix2int15(pegs[i].y), 6, color);
+			// update ball's position and velocity, check for peg hits
+			updateBall(&balls[i]);
+
+			fillCircle(fix2int15(balls[i].x), fix2int15(balls[i].y), BALL_RADIUS, GREEN);
+			// draw the ball at its new position
 		}
 
 		// draw the boundaries
-		drawArena();
+		drawBoard();
+
+		drawGraph();
+
+		readPotentiometer();
 
 		// delay in accordance with frame rate
 		spare_time = FRAME_RATE - (time_us_32() - begin_time);
 		// yield for necessary amount of time
 		PT_YIELD_usec(spare_time);
+		time_since_boot += ((float) FRAME_RATE) / ((float) 1000000);
 		// NEVER exit while
 	} // END WHILE(1)
 
@@ -388,6 +551,9 @@ int main()
     // Initialize SPI channel (channel, baud rate set to 20MHz)
     spi_init(SPI_PORT, 20000000);
 
+	// Initialize ADC
+	adc_init();
+
     // Format SPI channel (channel, data bits per transfer, polarity, phase, order)
     spi_set_format(SPI_PORT, 16, 0, 0, 0);
 
@@ -396,6 +562,9 @@ int main()
     gpio_set_function(PIN_CS, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+
+	adc_gpio_init(PIN_POT);
+	adc_select_input(1);
 
     // Build sine table and DAC data table
     int i;

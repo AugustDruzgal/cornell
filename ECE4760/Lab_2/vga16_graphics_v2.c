@@ -581,7 +581,7 @@ inline void setTextWrap(char w) {
 void tft_write(unsigned char c){
   if (c == '\n') {
     cursor_y += textsize*8;
-    cursor_x  = 0;
+    cursor_x  = 10;
   } else if (c == '\r') {
     // skip em
   } else if (c == '\t'){
