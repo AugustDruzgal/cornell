@@ -44,6 +44,17 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
+// Button state machine states
+typedef enum _button_state {
+    BUTTON_NOT_PRESSED,
+    BUTTON_MAYBE_PRESSED,
+    BUTTON_PRESSED,
+    BUTTON_MAYBE_NOT_PRESSED
+} button_state;
+
+#define BUTTON_PIN 15
+static button_state state = BUTTON_NOT_PRESSED;
+
 // Arrays in which raw measurements will be stored
 fix15 acceleration[3], gyro[3];
 
@@ -77,16 +88,82 @@ uint slice_num ;
 volatile int control ;
 volatile int old_control ;
 
-float kp = 0.008f;
-
 float control_temp;
+
+#define P_DEFAULT 600.0
+#define I_DEFAULT 0.50
+#define D_DEFAULT 100000
+
+#define ANGLE_DEFAULT 90
+
+#define NUM_ERRS 500
+
+#define USEC_PER_SEC 1000000
 
 fix15 accel_angle = int2fix15(0);
 fix15 gyro_angle_delta = int2fix15(0);
 fix15 complementary_angle = int2fix15(0);
-fix15 desired_angle = int2fix15(0);
+fix15 angle = int2fix15(ANGLE_DEFAULT);
+fix15 proportion = float2fix15(P_DEFAULT);
+fix15 integral = float2fix15(I_DEFAULT);
+float derivative = D_DEFAULT;
 fix15 desired_angle_rad;
 float error = 0.0f;
+
+bool update_display = true;
+
+float integral_err[NUM_ERRS] = {0};
+int integral_err_index = 0;
+
+// Update the state of the button using the button state machine
+bool update_button_state(void)
+{
+	uint32_t pressed = (gpio_get(BUTTON_PIN) == 0);
+
+	switch (state)
+	{
+		case BUTTON_NOT_PRESSED:
+			if (pressed)
+			{
+				state = BUTTON_MAYBE_PRESSED;
+			}
+			break;
+
+		case BUTTON_MAYBE_PRESSED:
+			if (pressed)
+			{
+				// When the button enters the pressed state, change the button mode
+				state = BUTTON_PRESSED;
+				angle = int2fix15(180);
+			}
+			else
+			{
+				state = BUTTON_NOT_PRESSED;
+			}
+			break;
+
+		case BUTTON_PRESSED:
+			if (!pressed)
+			{
+				state = BUTTON_MAYBE_NOT_PRESSED;
+			}
+			break;
+
+		case BUTTON_MAYBE_NOT_PRESSED:
+			if (pressed)
+			{
+				state = BUTTON_PRESSED;
+			}
+			else
+			{
+				state = BUTTON_NOT_PRESSED;
+                return true;
+			}
+			break;
+	}
+
+    return false;
+}
 
 // PWM interrupt service routine
 void on_pwm_wrap() {
@@ -113,11 +190,25 @@ void on_pwm_wrap() {
     gyro_angle_delta = multfix15(gyro[0], zeropt001) ;
 
     // Complementary angle (degrees - 15.16 fixed point)
-    complementary_angle = multfix15(complementary_angle - gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001);
+    complementary_angle = multfix15(complementary_angle - int2fix15(90) - gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001) + int2fix15(90);
 
-    error = ((fix2float15(desired_angle) - fix2float15(complementary_angle)) * kp);
+    float previous_error = error;
 
-    control_temp = control_temp - error;
+    error = ((fix2float15(complementary_angle)) - fix2float15(angle));
+
+    integral_err[integral_err_index] = error;
+    integral_err_index = (integral_err_index + 1)%NUM_ERRS;
+
+    float delta_err = error - previous_error;
+
+    float sum_errs = 0;
+
+    for (int i = 0; i < NUM_ERRS; i++)
+    {
+        sum_errs += integral_err[i];
+    }
+
+    control_temp = error * fix2float15(proportion) + sum_errs * fix2float15(integral) + delta_err * derivative;
 
     if (control_temp > 2500)
         control_temp = 2500;
@@ -135,18 +226,85 @@ static PT_THREAD (protothread_serial(struct pt *pt))
 {
     PT_BEGIN(pt) ;
     static int test_in ;
+    static char mode;
+    static float value;
+
     while(1) {
-        sprintf(pt_serial_out_buffer, "input a kp (-45-45): ");
+        sprintf(pt_serial_out_buffer, "change value (p, i, d, a):");
         serial_write ;
         // spawn a thread to do the non-blocking serial read
         serial_read ;
         // convert input string to number
-        sscanf(pt_serial_in_buffer,"%f", &kp) ;
+        sscanf(pt_serial_in_buffer,"%c", &mode) ;
+        
+        sprintf(pt_serial_out_buffer, "new value:");
+        serial_write ;
+        // spawn a thread to do the non-blocking serial read
+        serial_read ;
+        sscanf(pt_serial_in_buffer,"%f", &value) ;
+
+        switch (mode)
+        {
+            case 'p':
+                proportion = float2fix15(value);
+                break;
+            case 'i':
+                integral = float2fix15(value);
+                break;
+            case 'd':
+                derivative = value;
+                break;
+            case 'a':
+                angle = float2fix15(180 - value);
+                break;
+            default: 
+                break;
+        }
+
+        update_display = true;
+
         //if (test_in > 50) continue ;
         //else if (test_in < -50) continue ;
-        //else desired_angle = int2fix15(test_in) ;
+        //else angle = int2fix15(test_in) ;
     }
     PT_END(pt) ;
+}
+
+static PT_THREAD (protothread_button(struct pt *pt))
+{
+    // Indicate start of thread
+    PT_BEGIN(pt) ;
+
+    while (true)
+    {
+        bool pressed = update_button_state();
+
+        if (pressed)
+        {
+            printf("Starting sequence\n");
+            angle = int2fix15(90);
+            update_display = true;
+		    PT_YIELD_usec(5 * USEC_PER_SEC);
+            printf("...\n");
+            angle = int2fix15(60);
+            update_display = true;
+		    PT_YIELD_usec(5 * USEC_PER_SEC);
+            printf("...\n");
+            angle = int2fix15(120);
+            update_display = true;
+		    PT_YIELD_usec(5 * USEC_PER_SEC);
+            printf("Finished\n");
+            angle = int2fix15(90);
+            update_display = true;
+        }
+        else
+        {
+		    PT_YIELD_usec(1000);
+        }
+    }
+
+    // Indicate end of thread
+    PT_END(pt);
 }
 
 // Thread that draws to VGA display
@@ -169,14 +327,14 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 
     // Draw the static aspects of the display
     setTextSize(1) ;
-    setTextColor(WHITE);
+    setTextColor2(WHITE, BLACK);
 
     // Draw bottom plot
     drawHLine(75, 430, 5, CYAN) ;
     drawHLine(75, 355, 5, CYAN) ;
     drawHLine(75, 280, 5, CYAN) ;
     drawVLine(80, 280, 150, CYAN) ;
-    sprintf(screentext, "2500") ;
+    sprintf(screentext, "5000") ;
     setCursor(50, 280) ;
     writeString(screentext) ;
     sprintf(screentext, "0") ;
@@ -188,13 +346,13 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     drawHLine(75, 155, 5, CYAN) ;
     drawHLine(75, 80, 5, CYAN) ;
     drawVLine(80, 80, 150, CYAN) ;
-    sprintf(screentext, "0") ;
+    sprintf(screentext, "90") ;
     setCursor(50, 150) ;
     writeString(screentext) ;
-    sprintf(screentext, "-90") ;
+    sprintf(screentext, "180") ;
     setCursor(45, 75) ;
     writeString(screentext) ;
-    sprintf(screentext, "90") ;
+    sprintf(screentext, "0") ;
     setCursor(45, 225) ;
     writeString(screentext) ;
     
@@ -208,32 +366,42 @@ static PT_THREAD (protothread_vga(struct pt *pt))
         if (throttle >= threshold) { 
             // Zero drawspeed controller
             throttle = 0 ;
-            
-            fillRect(0, 0, 200, 60, BLACK);
-            // sprintf(screentext, "Accel angle: %.02f", fix2float15(accel_angle));
-            // setCursor(30, 30);
-            // writeString(screentext);
-            // sprintf(screentext, "Gyro angle delta: %.02f", fix2float15(accel_angle));
-            // setCursor(30, 60);
-            // writeString(screentext);
-            sprintf(screentext, "Actual angle: %.02f", fix2float15(accel_angle));
-            setCursor(30, 15);
-            writeString(screentext);
-            sprintf(screentext, "Target angle degrees: %.02f", fix2float15(desired_angle));
-            setCursor(30, 30);
-            writeString(screentext);
-            sprintf(screentext, "Control duty cycle: %.02f", control_temp);
-            setCursor(30, 45);
-            writeString(screentext);
+
+            // if (update_display)
+            {
+                update_display = false;
+                // fillRect(0, 0, 500, 75, BLACK);
+                
+                sprintf(screentext, "Actual angle: %.02f    ", fix2float15(accel_angle));
+                setCursor(30, 15);
+                writeString(screentext);
+                sprintf(screentext, "Target angle degrees: %.02f    ", fix2float15(angle));
+                setCursor(30, 30);
+                writeString(screentext);
+                sprintf(screentext, "Control duty cycle: %.02f    ", control_temp);
+                setCursor(30, 45);
+                writeString(screentext);
+
+                sprintf(screentext, "P: %.02f    ", fix2float15(proportion));
+                setCursor(250, 15);
+                writeString(screentext);
+                sprintf(screentext, "I: %.02f    ", fix2float15(integral));
+                setCursor(250, 30);
+                writeString(screentext);
+                sprintf(screentext, "D: %.02f    ", derivative);
+                setCursor(250, 45);
+                writeString(screentext);
+            }
 
             // Erase a column
-            drawVLine(xcoord, 0, 480, BLACK) ;
+            drawVLine(xcoord, 75, 480, BLACK) ;
 
             // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-1250))/5)-OldMin)/OldRange)), WHITE) ;
+            drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
 
             // Draw top plot
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(complementary_angle)*2.5f)-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle)-90.0)*-2.5f)-OldMin)/OldRange)), RED) ;
 
             // Update horizontal cursor
             if (xcoord < 609) {
@@ -252,6 +420,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 // Entry point for core 1
 void core1_entry() {
     pt_add_thread(protothread_vga) ;
+    pt_add_thread(protothread_button) ;
     pt_schedule_start ;
 }
 
@@ -273,6 +442,9 @@ int main() {
     i2c_init(I2C_CHAN, I2C_BAUD_RATE) ;
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C) ;
     gpio_set_function(SCL_PIN, GPIO_FUNC_I2C) ;
+    
+	gpio_set_dir(BUTTON_PIN, false);
+	gpio_pull_up(BUTTON_PIN);
 
     // Pullup resistors on breakout board, don't need to turn on internals
     // gpio_pull_up(SDA_PIN) ;
