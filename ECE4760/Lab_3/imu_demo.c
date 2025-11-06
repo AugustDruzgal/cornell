@@ -1,35 +1,35 @@
 /**
  * V. Hunter Adams (vha3@cornell.edu)
- * PWM demo code with serial input
  * 
- * This demonstration sets a PWM duty cycle to a
- * user-specified value.
+ * This demonstration utilizes the MPU6050.
+ * It gathers raw accelerometer/gyro measurements, scales
+ * them, and plots them to the VGA display. The top plot
+ * shows gyro measurements, bottom plot shows accelerometer
+ * measurements.
  * 
  * HARDWARE CONNECTIONS
- *   - GPIO 4 ---> PWM output
- *   - GPIO 16 ---> VGA Hsync
- *   - GPIO 17 ---> VGA Vsync
- *   - GPIO 18 ---> 470 ohm resistor ---> VGA Green
- *   - GPIO 19 ---> 330 ohm resistor ---> VGA Green
- *   - GPIO 20 ---> 330 ohm resistor ---> VGA Blue
- *   - GPIO 21 ---> 330 ohm resistor ---> VGA Red
- *   - RP2040 GND ---> VGA GND
- *   - GPIO 8 ---> MPU6050 SDA
- *   - GPIO 9 ---> MPU6050 SCL
- *   - 3.3v ---> MPU6050 VCC
- *   - RP2040 GND ---> MPU6050 GND
+ *  - GPIO 16 ---> VGA Hsync
+ *  - GPIO 17 ---> VGA Vsync
+ *  - GPIO 18 ---> 470 ohm resistor ---> VGA Green
+ *  - GPIO 19 ---> 330 ohm resistor ---> VGA Green
+ *  - GPIO 20 ---> 330 ohm resistor ---> VGA Blue
+ *  - GPIO 21 ---> 330 ohm resistor ---> VGA Red
+ *  - RP2040 GND ---> VGA GND
+ *  - GPIO 8 ---> MPU6050 SDA
+ *  - GPIO 9 ---> MPU6050 SCL
+ *  - 3.3v ---> MPU6050 VCC
+ *  - RP2040 GND ---> MPU6050 GND
  */
+
 
 // Include standard libraries
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-
 // Include PICO libraries
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-
 // Include hardware libraries
 #include "hardware/pwm.h"
 #include "hardware/dma.h"
@@ -38,7 +38,6 @@
 #include "hardware/pio.h"
 #include "hardware/i2c.h"
 #include "hardware/clocks.h"
-
 // Include custom libraries
 #include "vga16_graphics_v2.h"
 #include "mpu6050.h"
@@ -61,92 +60,25 @@ int threshold = 10 ;
 // semaphore
 static struct pt_sem vga_semaphore ;
 
-// PWM wrap value and clock divide value
-// For a CPU rate of 125 MHz, this gives
-// a PWM frequency of 1 kHz.
+// Some paramters for PWM
 #define WRAPVAL 5000
-#define CLKDIV 25.0f
-
-// GPIO we're using for PWM
-#define PWM_OUT 4
-
-// Variable to hold PWM slice number
+#define CLKDIV  25.0
 uint slice_num ;
 
-// PWM duty cycle
-volatile int control ;
-volatile int old_control ;
-
-float kp = 0.008f;
-
-float control_temp;
-
-fix15 accel_angle = int2fix15(0);
-fix15 gyro_angle_delta = int2fix15(0);
-fix15 complementary_angle = int2fix15(0);
-fix15 desired_angle = int2fix15(0);
-fix15 desired_angle_rad;
-float error = 0.0f;
-
-// PWM interrupt service routine
+// Interrupt service routine
 void on_pwm_wrap() {
+
     // Clear the interrupt flag that brought us here
-    pwm_clear_irq(pwm_gpio_to_slice_num(PWM_OUT));
-    // Update duty cycle
-    if (control!=old_control) {
-        old_control = control ;
-        pwm_set_chan_level(slice_num, PWM_CHAN_A, control);
-    }
-    
+    pwm_clear_irq(pwm_gpio_to_slice_num(5));
+
     // Read the IMU
     // NOTE! This is in 15.16 fixed point. Accel in g's, gyro in deg/s
     // If you want these values in floating point, call fix2float15() on
     // the raw measurements.
     mpu6050_read_raw(acceleration, gyro);
 
-    // SMALL ANGLE APPROXIMATION
-    accel_angle = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
-    // NO SMALL ANGLE APPROXIMATION
-    // accel_angle = multfix15(float2fix15(atan2(-filtered_ax, filtered_ay) + PI), oneeightyoverpi);
-
-    // Gyro angle delta (measurement times timestep) (15.16 fixed point)
-    gyro_angle_delta = multfix15(gyro[0], zeropt001) ;
-
-    // Complementary angle (degrees - 15.16 fixed point)
-    complementary_angle = multfix15(complementary_angle - gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001);
-
-    error = ((fix2float15(desired_angle) - fix2float15(complementary_angle)) * kp);
-
-    control_temp = control_temp - error;
-
-    if (control_temp > 2500)
-        control_temp = 2500;
-    if (control_temp < 0)
-        control_temp = 0;
-
-    control = (int) control_temp;
-
     // Signal VGA to draw
     PT_SEM_SIGNAL(pt, &vga_semaphore);
-}
-
-// User input thread
-static PT_THREAD (protothread_serial(struct pt *pt))
-{
-    PT_BEGIN(pt) ;
-    static int test_in ;
-    while(1) {
-        sprintf(pt_serial_out_buffer, "input a kp (-45-45): ");
-        serial_write ;
-        // spawn a thread to do the non-blocking serial read
-        serial_read ;
-        // convert input string to number
-        sscanf(pt_serial_in_buffer,"%f", &kp) ;
-        //if (test_in > 50) continue ;
-        //else if (test_in < -50) continue ;
-        //else desired_angle = int2fix15(test_in) ;
-    }
-    PT_END(pt) ;
 }
 
 // Thread that draws to VGA display
@@ -176,10 +108,13 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     drawHLine(75, 355, 5, CYAN) ;
     drawHLine(75, 280, 5, CYAN) ;
     drawVLine(80, 280, 150, CYAN) ;
-    sprintf(screentext, "2500") ;
+    sprintf(screentext, "0") ;
+    setCursor(50, 350) ;
+    writeString(screentext) ;
+    sprintf(screentext, "+2") ;
     setCursor(50, 280) ;
     writeString(screentext) ;
-    sprintf(screentext, "0") ;
+    sprintf(screentext, "-2") ;
     setCursor(50, 425) ;
     writeString(screentext) ;
 
@@ -191,10 +126,10 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     sprintf(screentext, "0") ;
     setCursor(50, 150) ;
     writeString(screentext) ;
-    sprintf(screentext, "-90") ;
+    sprintf(screentext, "+250") ;
     setCursor(45, 75) ;
     writeString(screentext) ;
-    sprintf(screentext, "90") ;
+    sprintf(screentext, "-250") ;
     setCursor(45, 225) ;
     writeString(screentext) ;
     
@@ -208,32 +143,19 @@ static PT_THREAD (protothread_vga(struct pt *pt))
         if (throttle >= threshold) { 
             // Zero drawspeed controller
             throttle = 0 ;
-            
-            fillRect(0, 0, 200, 60, BLACK);
-            // sprintf(screentext, "Accel angle: %.02f", fix2float15(accel_angle));
-            // setCursor(30, 30);
-            // writeString(screentext);
-            // sprintf(screentext, "Gyro angle delta: %.02f", fix2float15(accel_angle));
-            // setCursor(30, 60);
-            // writeString(screentext);
-            sprintf(screentext, "Actual angle: %.02f", fix2float15(accel_angle));
-            setCursor(30, 15);
-            writeString(screentext);
-            sprintf(screentext, "Target angle degrees: %.02f", fix2float15(desired_angle));
-            setCursor(30, 30);
-            writeString(screentext);
-            sprintf(screentext, "Control duty cycle: %.02f", control_temp);
-            setCursor(30, 45);
-            writeString(screentext);
 
             // Erase a column
             drawVLine(xcoord, 0, 480, BLACK) ;
 
             // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-1250))/5)-OldMin)/OldRange)), WHITE) ;
+            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[0])*120.0)-OldMin)/OldRange)), WHITE) ;
+            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[1])*120.0)-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[2])*120.0)-OldMin)/OldRange)), GREEN) ;
 
             // Draw top plot
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(complementary_angle)*2.5f)-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[0]))-OldMin)/OldRange)), WHITE) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[1]))-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[2]))-OldMin)/OldRange)), GREEN) ;
 
             // Update horizontal cursor
             if (xcoord < 609) {
@@ -242,11 +164,40 @@ static PT_THREAD (protothread_vga(struct pt *pt))
             else {
                 xcoord = 81 ;
             }
-           
         }
     }
     // Indicate end of thread
     PT_END(pt);
+}
+
+// User input thread. User can change draw speed
+static PT_THREAD (protothread_serial(struct pt *pt))
+{
+    PT_BEGIN(pt) ;
+    static char classifier ;
+    static int test_in ;
+    static float float_in ;
+    while(1) {
+        sprintf(pt_serial_out_buffer, "input a command: ");
+        serial_write ;
+        // spawn a thread to do the non-blocking serial read
+        serial_read ;
+        // convert input string to number
+        sscanf(pt_serial_in_buffer,"%c", &classifier) ;
+
+        // num_independents = test_in ;
+        if (classifier=='t') {
+            sprintf(pt_serial_out_buffer, "timestep: ");
+            serial_write ;
+            serial_read ;
+            // convert input string to number
+            sscanf(pt_serial_in_buffer,"%d", &test_in) ;
+            if (test_in > 0) {
+                threshold = test_in ;
+            }
+        }
+    }
+    PT_END(pt) ;
 }
 
 // Entry point for core 1
@@ -262,8 +213,6 @@ int main() {
 
     // Initialize stdio
     stdio_init_all();
-
-    printf("Starting\n");
 
     // Initialize VGA
     initVGA() ;
@@ -285,13 +234,12 @@ int main() {
     ////////////////////////////////////////////////////////////////////////
     ///////////////////////// PWM CONFIGURATION ////////////////////////////
     ////////////////////////////////////////////////////////////////////////
-    // Tell GPIO PWM_OUT that it is allocated to the PWM
+    // Tell GPIO's 4,5 that they allocated to the PWM
     gpio_set_function(5, GPIO_FUNC_PWM);
-    // gpio_set_function(4, GPIO_FUNC_PWM);
-    gpio_set_function(PWM_OUT, GPIO_FUNC_PWM);
+    gpio_set_function(4, GPIO_FUNC_PWM);
 
-    // Find out which PWM slice is connected to GPIO PWM_OUT (it's slice 2)
-    slice_num = pwm_gpio_to_slice_num(PWM_OUT);
+    // Find out which PWM slice is connected to GPIO 5 (it's slice 2, same for 4)
+    slice_num = pwm_gpio_to_slice_num(5);
 
     // Mask our slice's IRQ output into the PWM block's single interrupt line,
     // and register our interrupt handler
@@ -306,10 +254,11 @@ int main() {
 
     // This sets duty cycle
     pwm_set_chan_level(slice_num, PWM_CHAN_B, 0);
-    pwm_set_chan_level(slice_num, PWM_CHAN_A, 3125);
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
 
     // Start the channel
     pwm_set_mask_enabled((1u << slice_num));
+
 
     ////////////////////////////////////////////////////////////////////////
     ///////////////////////////// ROCK AND ROLL ////////////////////////////
@@ -318,6 +267,7 @@ int main() {
     multicore_reset_core1();
     multicore_launch_core1(core1_entry);
 
+    // start core 0
     pt_add_thread(protothread_serial) ;
     pt_schedule_start ;
 
