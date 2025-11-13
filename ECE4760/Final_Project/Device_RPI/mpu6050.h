@@ -18,6 +18,7 @@ typedef signed int fix15 ;
 #define int2fix15(a) ((a)<<16)
 #define fix2int15(a) ((a)>>16)
 #define divfix(a,b) ((fix15)(((( signed long long)(a) << 16 / (b)))))
+#define squarefix(a) (multfix15(a, a))
 // Parameter values
 #define oneeightyoverpi 3754936
 #define zeropt001 65
