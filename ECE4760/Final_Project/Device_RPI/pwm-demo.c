@@ -44,6 +44,36 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
+// ---------------------------------------------------------
+// BOXES GAME parameters
+// ---------------------------------------------------------
+// Screen boundaries
+#define SCREEN_TOP_Y 5
+#define SCREEN_BOTTOM_Y 475
+#define SCREEN_LEFT_X 5
+#define SCREEN_RIGHT_X 635
+// ---- Rotating board (paddle) params ----
+static float board_angle_deg = 15.0f;     // <-- control this variable to rotate the board
+#define BOARD_WIDTH   300
+#define BOARD_HEIGHT  12
+#define BOARD_Y       (SCREEN_BOTTOM_Y - 50)   // vertical position of the board center
+#define BOARD_X       ((SCREEN_LEFT_X + SCREEN_RIGHT_X)/2)  // centered horizontally
+#define MAX_BOXES 1
+// the color of the box
+char color = WHITE;
+// Simulation parameters
+static fix15 box_gravity = float2fix15(0.75f);
+#define BOX_START_X 320
+#define BOX_START_Y 25
+#define BOX_START_DX_MAX 1
+
+
+
+// ---------------------------------------------------------
+// BOXES GAME parameters END
+// ---------------------------------------------------------
+
+
 // Arrays in which raw measurements will be stored
 fix15 acceleration[3], gyro[3];
 
@@ -95,6 +125,63 @@ fix15 complementary_angle_x = int2fix15(0);
 fix15 accel_angle_y = int2fix15(0);
 fix15 gyro_angle_delta_y = int2fix15(0);
 fix15 complementary_angle_y = int2fix15(0);
+
+
+// -------------------------------------------------------------------------
+// Rotated rectangle functions
+// -------------------------------------------------------------------------
+
+static void drawRotatedRectOutline(int cx, int cy, int w, int h, float angle_deg, uint16_t color) {
+    float rad = angle_deg * 3.14159265f / 180.0f;
+    float c = cosf(rad), s = sinf(rad);
+    float hx = 0.5f * w, hy = 0.5f * h;
+
+    // corners: TL, TR, BR, BL
+    float ux[4] = {-hx,  hx,  hx, -hx};
+    float uy[4] = {-hy, -hy,  hy,  hy};
+    int px[4], py[4];
+    for (int i = 0; i < 4; i++) {
+        float rx = ux[i]*c - uy[i]*s;
+        float ry = ux[i]*s + uy[i]*c;
+        px[i] = (int)(cx + rx);
+        py[i] = (int)(cy + ry);
+    }
+    drawLine(px[0],py[0], px[1],py[1], color);
+    drawLine(px[1],py[1], px[2],py[2], color);
+    drawLine(px[2],py[2], px[3],py[3], color);
+    drawLine(px[3],py[3], px[0],py[0], color);
+}
+
+
+static inline void drawBoardPaddle(void) {
+    drawRotatedRectOutline(BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT, board_angle_deg, WHITE);
+}
+
+// Draw the boundaries
+void drawBoard() 
+{
+	drawVLine(SCREEN_RIGHT_X, SCREEN_TOP_Y, SCREEN_BOTTOM_Y - SCREEN_TOP_Y, WHITE);
+	drawVLine(SCREEN_LEFT_X, SCREEN_TOP_Y, SCREEN_BOTTOM_Y - SCREEN_TOP_Y, WHITE);
+	drawHLine(SCREEN_LEFT_X, SCREEN_BOTTOM_Y, SCREEN_RIGHT_X - SCREEN_LEFT_X, WHITE);
+	drawHLine(SCREEN_LEFT_X, SCREEN_TOP_Y, SCREEN_RIGHT_X - SCREEN_LEFT_X, WHITE);
+
+	setCursor(10, 10);
+	setTextSize(1);
+	setTextColor2(WHITE, BLACK);
+	
+	static char str[256];
+
+	// drawRect(10, 10, 200, 100, BLACK);
+	writeString(str);
+}
+
+
+// --------------------------------------------------------------------------
+// Rotated rectangle functions END
+// --------------------------------------------------------------------------
+
+
+
 
 // PWM interrupt service routine
 void on_pwm_wrap() {
@@ -226,6 +313,10 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     
 
     while (true) {
+        fillRect(0, 0, 640, 480, BLACK);
+        drawBoard();
+        drawBoardPaddle();
+
         // Wait on semaphore
         PT_SEM_WAIT(pt, &vga_semaphore);
         // Increment drawspeed controller

@@ -63,6 +63,11 @@ typedef struct _box {
 	// box_t *last_box;
 } box_t;
 
+
+// Box array
+static box_t boxes[MAX_BOXES];
+static int boxes_len = 0;
+
 // ---------------------------------------------------------
 // BOXES GAME parameters
 // ---------------------------------------------------------
@@ -104,11 +109,6 @@ char screentext[40];
 
 // draw speed
 int threshold = 10 ;
-
-
-// Box array
-static box_t boxes[MAX_BOXES];
-static int boxes_len = 0;
 
 // Some macros for max/min/abs
 #define min(a,b) ((a<b) ? a:b)
@@ -165,7 +165,7 @@ int integral_err_index = 0;
 // -------------------------------------------------------------------------
 // Rotated rectangle functions
 // -------------------------------------------------------------------------
-// ----- Rotated rectangle OUTLINE (no triangles needed) -----
+
 static void drawRotatedRectOutline(int cx, int cy, int w, int h, float angle_deg, uint16_t color) {
     float rad = angle_deg * 3.14159265f / 180.0f;
     float c = cosf(rad), s = sinf(rad);
@@ -188,7 +188,6 @@ static void drawRotatedRectOutline(int cx, int cy, int w, int h, float angle_deg
 }
 
 
-// ----- Convenience wrapper (call this in your VGA loop) -----
 static inline void drawBoardPaddle(void) {
     drawRotatedRectOutline(BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT, board_angle_deg, WHITE);
 }
