@@ -44,39 +44,6 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
-// // Include Chipmunk2D physics library
-// #include "chipmunk/chipmunk.h"
-
-#include "pico/time.h"
-#include <stdbool.h>   // add this near the other includes
-
-
-// ---------- Tunable physics knobs ----------
-// Fall speed of the box (independent of "mass")
-static const float BOX_GRAVITY     = 80.0f;   // pixels/s^2
-
-// How "heavy" the box feels when it hits
-static const float BOX_MASS        = 14.0f;    // larger = more torque
-
-// How hard the board is to rotate (like moment of inertia)
-static const float BOARD_INERTIA   = 1200.0f;   // larger = harder to spin
-
-// Board spring & damping (return-to-center and friction)
-static const float BOARD_SPRING_K  = 15.0f;   // was 30
-static const float BOARD_DAMP      = 1.5f;    // was 5
-
-// How strongly impact torque is scaled (first collision only)
-static const float IMPACT_SCALE        = 0.08f;  // smaller = softer initial kick
-
-// How strongly "weight" torque is scaled (while sitting)
-static const float STATIC_WEIGHT_SCALE = 14.0f; // you already had something like this
-
-// 0 < BOX_FRICTION <= 1
-// 1.0  = zero friction (no slowdown along board)
-// 0.9  = light friction
-// 0.5  = heavy friction
-static const float BOX_FRICTION   = 0.95f;   // try 0.95–0.99 for very滑滑
-
 // Button state machine states
 typedef enum _button_state {
     BUTTON_NOT_PRESSED,
@@ -85,50 +52,16 @@ typedef enum _button_state {
     BUTTON_MAYBE_NOT_PRESSED
 } button_state;
 
-typedef enum {
-    SUPPORT_BOARD,
-    SUPPORT_BOX
-} support_type_t;
-
-
-
-// -----------------
-// Simple custom physics types
-// -----------------
-typedef struct {
-    float x, y;
-    float vx, vy;
-    float angle;    // radians: 0 while falling, then matches platform
-
-    bool  on_board;    // has this box landed?
-    float lx;          // x-position in *board-local* coordinates
-    int   stack_level; // 0 = directly on board, 1 = on top of one box, etc.
-    float vx_local;    // <--- NEW: velocity along the board
-
-    support_type_t support_type;
-    int support_index;   // which box if SUPPORT_BOX (ignored if SUPPORT_BOARD)
-
-} phys_box_t;
-
-typedef struct {
-    float cx, cy;   // center position
-    float angle;    // radians
-    float omega;    // angular velocity (rad/s)
-} phys_platform_t;
-
-#define MAX_BOXES 30   
-
-static phys_box_t boxes[MAX_BOXES];
-static int num_boxes = 0;
-
-static phys_platform_t pplat;
-
-// spawn timer
-static uint64_t last_spawn_time_us = 0;
-
-
-static const float physics_dt = 1.0f / 60.0f;  // 60 Hz physics step
-
+// Ball definition
+typedef struct _box {
+    fix15 width;
+    fix15 height;
+	fix15 x;
+	fix15 y;
+	fix15 vx;
+	fix15 vy;
+	// box_t *last_box;
+} box_t;
 
 // ---------------------------------------------------------
 // BOXES GAME parameters
@@ -138,22 +71,22 @@ static const float physics_dt = 1.0f / 60.0f;  // 60 Hz physics step
 #define SCREEN_BOTTOM_Y 475
 #define SCREEN_LEFT_X 5
 #define SCREEN_RIGHT_X 635
-
-#define SCREEN_MIDDLE_X 320
-
 // ---- Rotating board (paddle) params ----
 static float board_angle_deg = 15.0f;     // <-- control this variable to rotate the board
 #define BOARD_WIDTH   300
 #define BOARD_HEIGHT  12
-#define BOARD_Y       (SCREEN_BOTTOM_Y - 150)   // vertical position of the board center
+#define BOARD_Y       (SCREEN_BOTTOM_Y - 50)   // vertical position of the board center
 #define BOARD_X       ((SCREEN_LEFT_X + SCREEN_RIGHT_X)/2)  // centered horizontally
-// #define MAX_BOXES 1
+#define MAX_BOXES 1
 // the color of the box
 char color = WHITE;
 // Simulation parameters
+static fix15 box_gravity = float2fix15(0.75f);
 #define BOX_START_X 320
-#define BOX_START_Y 0
+#define BOX_START_Y 25
 #define BOX_START_DX_MAX 1
+
+
 
 // ---------------------------------------------------------
 // BOXES GAME parameters END
@@ -173,7 +106,9 @@ char screentext[40];
 int threshold = 10 ;
 
 
-
+// Box array
+static box_t boxes[MAX_BOXES];
+static int boxes_len = 0;
 
 // Some macros for max/min/abs
 #define min(a,b) ((a<b) ? a:b)
@@ -227,12 +162,6 @@ float integral_err[NUM_ERRS] = {0};
 int integral_err_index = 0;
 
 
-// Randomized frop box
-static float rand_unit(void) {
-    return (float)rand() / (float)(RAND_MAX + 1.0f);
-}
-
-
 // -------------------------------------------------------------------------
 // Rotated rectangle functions
 // -------------------------------------------------------------------------
@@ -258,18 +187,144 @@ static void drawRotatedRectOutline(int cx, int cy, int w, int h, float angle_deg
     drawLine(px[3],py[3], px[0],py[0], color);
 }
 
+
+// ----- Convenience wrapper (call this in your VGA loop) -----
 static inline void drawBoardPaddle(void) {
     drawRotatedRectOutline(BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT, board_angle_deg, WHITE);
-}
-static void drawBoxRotated(float x, float y, float angle_rad, int size, uint16_t color) {
-    float angle_deg = angle_rad * 180.0f / 3.14159265f;
-    drawRotatedRectOutline((int)x, (int)y, size, size, angle_deg, color);
 }
 
 // --------------------------------------------------------------------------
 // Rotated rectangle functions END
 // --------------------------------------------------------------------------
 
+
+// // Update the state of the button using the button state machine
+// bool update_button_state(void)
+// {
+// 	uint32_t pressed = (gpio_get(BUTTON_PIN) == 0);
+
+// 	switch (state)
+// 	{
+// 		case BUTTON_NOT_PRESSED:
+// 			if (pressed)
+// 			{
+// 				state = BUTTON_MAYBE_PRESSED;
+// 			}
+// 			break;
+
+// 		case BUTTON_MAYBE_PRESSED:
+// 			if (pressed)
+// 			{
+// 				// When the button enters the pressed state, change the button mode
+// 				state = BUTTON_PRESSED;
+// 				angle = int2fix15(180);
+// 			}
+// 			else
+// 			{
+// 				state = BUTTON_NOT_PRESSED;
+// 			}
+// 			break;
+
+// 		case BUTTON_PRESSED:
+// 			if (!pressed)
+// 			{
+// 				state = BUTTON_MAYBE_NOT_PRESSED;
+// 			}
+// 			break;
+
+// 		case BUTTON_MAYBE_NOT_PRESSED:
+// 			if (pressed)
+// 			{
+// 				state = BUTTON_PRESSED;
+// 			}
+// 			else
+// 			{
+// 				state = BUTTON_NOT_PRESSED;
+//                 return true;
+// 			}
+// 			break;
+// 	}
+
+//     return false;
+// }
+
+// // PWM interrupt service routine
+// void on_pwm_wrap() {
+//     // Clear the interrupt flag that brought us here
+//     pwm_clear_irq(pwm_gpio_to_slice_num(PWM_OUT));
+//     // Update duty cycle
+//     if (control!=old_control) {
+//         old_control = control ;
+//         pwm_set_chan_level(slice_num, PWM_CHAN_A, control);
+//     }
+    
+//     // Read the IMU
+//     // NOTE! This is in 15.16 fixed point. Accel in g's, gyro in deg/s
+//     // If you want these values in floating point, call fix2float15() on
+//     // the raw measurements.
+//     mpu6050_read_raw(acceleration, gyro);
+
+//     // SMALL ANGLE APPROXIMATION
+//     accel_angle = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
+//     // NO SMALL ANGLE APPROXIMATION
+//     // accel_angle = multfix15(float2fix15(atan2(-filtered_ax, filtered_ay) + PI), oneeightyoverpi);
+
+//     // Gyro angle delta (measurement times timestep) (15.16 fixed point)
+//     gyro_angle_delta = multfix15(gyro[0], zeropt001) ;
+
+//     // Complementary angle (degrees - 15.16 fixed point)
+//     complementary_angle = multfix15(complementary_angle - int2fix15(90) - gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001) + int2fix15(90);
+
+//     float previous_error = error;
+
+//     error = ((fix2float15(complementary_angle)) - fix2float15(angle));
+
+//     integral_err[integral_err_index] = error;
+//     integral_err_index = (integral_err_index + 1)%NUM_ERRS;
+
+//     float delta_err = error - previous_error;
+
+//     float sum_errs = 0;
+
+//     for (int i = 0; i < NUM_ERRS; i++)
+//     {
+//         sum_errs += integral_err[i];
+//     }
+
+//     control_temp = error * fix2float15(proportion) + sum_errs * fix2float15(integral) + delta_err * derivative;
+
+//     if (control_temp > 2500)
+//         control_temp = 2500;
+//     if (control_temp < 0)
+//         control_temp = 0;
+
+//     control = (int) control_temp;
+
+//     // Signal VGA to draw
+//     PT_SEM_SIGNAL(pt, &vga_semaphore);
+// }
+
+// Reset a box's position to the top of the screen
+void resetBox(box_t *box)
+{
+	// box->last_peg = NULL;
+	box->x = int2fix15(BOX_START_X);
+	box->y = int2fix15(BOX_START_Y);
+	box->vy = 0;
+
+	int r = rand() % 1000;
+	r -= 500;
+
+	box->vx = multfix15(divfix(int2fix15(r), int2fix15(500)), int2fix15(BOX_START_DX_MAX));
+}
+
+
+// Create a new box
+void spawnbox(void)
+{
+	box_t *box = &boxes[boxes_len++];
+	resetBox(box);
+}
 
 // Draw the boundaries
 void drawBoard() 
@@ -289,335 +344,98 @@ void drawBoard()
 	writeString(str);
 }
 
-// ------------------Initialize physics state----------------------------
-static void init_box(phys_box_t *b) {
-    float halfL = 0.5f * (float)BOARD_WIDTH;  // half-length of board
-    float r     = 10.0f;                      // half-size of box (20x20)
 
-    float u = rand_unit(); // random in [0,1)
-
-    float minX = pplat.cx - halfL + r;
-    float maxX = pplat.cx + halfL - r;
-
-    b->x     = minX + u * (maxX - minX);  // random x "above" the board region
-
-    // b->x     = 280.0f;          // TEST: stacking in the middle
-    b->y     = (float)BOX_START_Y;        // from the top
-    b->vx    = 0.0f;
-    b->vy    = 0.0f;
-    b->angle = 0.0f;                      // horizontal while falling
-
-    b->on_board    = false;
-    b->lx          = 0.0f;
-    b->stack_level = 0;
-
-    b->vx_local = 0.0f;    // <--- NEW: velocity along the board
-     // by default, not actually supported by anything yet
-    b->support_type  = SUPPORT_BOARD;
-    b->support_index = -1;
-}
-
-
-static void physics_init(void) {
-    // Platform
-    pplat.cx    = (float)BOARD_X;
-    pplat.cy    = (float)BOARD_Y;
-    pplat.angle = board_angle_deg * 3.14159265f / 180.0f; // convert deg -> rad
-    pplat.omega = 0.0f;
-
-    // First box
-    num_boxes = 0;
-    init_box(&boxes[num_boxes++]);
-
-    // Spawn timer: "now"
-    last_spawn_time_us = time_us_64();
-}
-
-
-static void physics_step(void) {
-    // --- Constants (tweak to taste) ---
-    const float g           = BOX_GRAVITY;
-    const float floor_y     = (float)SCREEN_BOTTOM_Y - 2.0f;
-    const float L           = (float)BOARD_WIDTH;
-    const float H           = (float)BOARD_HEIGHT;
-    const float r           = 10.0f;          // half-size of box (20x20)
-    const float spring_k    = BOARD_SPRING_K;
-    const float damp        = BOARD_DAMP;
-    const float restitution = 0.0f;
-    const float STACK_BIN   = 1.2f * r;       // x-range on board considered "same column"
-
-    float halfL = 0.5f * L;
-    float halfH = 0.5f * H;
-
-    float support_half_width;
-    float box_half_width = r;  // since box width = 2*r
-
-
-
-    // 0) Spawn new box every 5 seconds
-    const uint64_t SPAWN_INTERVAL_US = 1000000; // 1 second
-    uint64_t now = time_us_64();
-    if (num_boxes < MAX_BOXES && (now - last_spawn_time_us) >= SPAWN_INTERVAL_US) {
-        init_box(&boxes[num_boxes++]);
-        last_spawn_time_us = now;
-    }
-
-    // Precompute board trig
-    float c = cosf(pplat.angle);
-    float s = sinf(pplat.angle);
-
-    // 1) Update boxes
-    for (int i = 0; i < num_boxes; i++) {
-        phys_box_t *b = &boxes[i];
-
-        // ----------------------------
-        // A) Boxes that are already on the board: ride with the board
-        // ----------------------------
-        // if (b->on_board) {
-        //     // Its local y = board surface + stack height
-        //     float ly = -halfH - r - 2.0f * r * (float)b->stack_level;
-
-        //     float wx = b->lx * c - ly * s;
-        //     float wy = b->lx * s + ly * c;
-
-        //     b->x = pplat.cx + wx;
-        //     b->y = pplat.cy + wy;
-        //     b->angle = pplat.angle;
-        //     // No gravity integration while stuck to board
-        //     continue;
-        // }
-            // ----------------------------
-            // A) Boxes that are already on some support: can slide along board
-            // ----------------------------
-            if (b->on_board) {
-                   // 0) If I'm standing on another box, but that box is no longer on the board,
-                    //    I should also start falling.
-                    if (b->support_type == SUPPORT_BOX) {
-                        int si = b->support_index;
-                        if (si < 0 || !boxes[si].on_board) {
-                            // Convert from local coordinates back to world before dropping
-                            float ly = -halfH - r - 2.0f * r * (float)b->stack_level;
-
-                            float wx = b->lx * c - ly * s;
-                            float wy = b->lx * s + ly * c;
-                            b->x = pplat.cx + wx;
-                            b->y = pplat.cy + wy;
-
-                            // Turn tangential velocity into world vx,vy as we let it go
-                            b->vx = b->vx_local * c;
-                            b->vy = b->vx_local * s;
-
-                            b->on_board      = false;
-                            b->support_type  = SUPPORT_BOARD;
-                            b->support_index = -1;
-
-                            // Done with this box for this step
-                            continue;
-                        }
-                    }
-                // Gravity component along the board (sign may need flipping
-                // depending on what "positive" angle means visually)
-                float a_t = g * sinf(pplat.angle);
-                // If this makes boxes slide uphill, change to: float a_t = -g * sinf(pplat.angle);
-
-                // Update tangential velocity along the board
-                b->vx_local += a_t * physics_dt;
-
-                // Apply friction
-                b->vx_local *= BOX_FRICTION;
-
-                // Move along the support
-                b->lx += b->vx_local * physics_dt;
-
-                // Height of the stack this box sits on (same formula as before)
-                float ly = -halfH - r - 2.0f * r * (float)b->stack_level;
-
-                // --- Decide how wide the support is and where its center is ---
-                float box_half_width = r;    // half box width
-                float support_half_width;
-                float support_center_lx;
-
-                if (b->support_type == SUPPORT_BOARD) {
-                    // Board: wide support, centered at lx = 0
-                    support_half_width = halfL;
-                    support_center_lx  = 0.0f;
-                } else { // SUPPORT_BOX
-                    // Standing on a single box:
-                    //  - support width = box width
-                    //  - support center = that box's lx
-                    support_half_width = box_half_width;
-                    if (b->support_index >= 0) {
-                        support_center_lx = boxes[b->support_index].lx;
-                    } else {
-                        // Failsafe: treat as board center if index missing
-                        support_center_lx = 0.0f;
-                    }
-                }
-
-                // Drop when this box's CENTER is no longer above its support's footprint
-                // i.e., when distance from support center exceeds (support_half - own_half)
-                float rel_lx = b->lx - support_center_lx;
-                if (fabsf(rel_lx) > (support_half_width - box_half_width)) {
-                    // Convert local pos back to world before we let it fall
-                    float wx = b->lx * c - ly * s;
-                    float wy = b->lx * s + ly * c;
-                    b->x = pplat.cx + wx;
-                    b->y = pplat.cy + wy;
-
-                    // Local → world velocity (only tangential, no jump in normal)
-                    b->vx = b->vx_local * c;
-                    b->vy = b->vx_local * s;
-
-                    // It is no longer stuck to anything
-                    b->on_board      = false;
-                    b->support_type  = SUPPORT_BOARD;
-                    b->support_index = -1;
-                    continue;
-                }
-
-
-                // Still supported: convert local coords back to world
-                float wx = b->lx * c - ly * s;
-                float wy = b->lx * s + ly * c;
-                b->x = pplat.cx + wx;
-                b->y = pplat.cy + wy;
-                b->angle = pplat.angle;
-
-                continue;
-            }
-
-
-
-
-        // ----------------------------
-        // B) Falling boxes
-        // ----------------------------
-
-        // Gravity integration
-        b->vy += g * physics_dt;
-        b->x  += b->vx * physics_dt;
-        b->y  += b->vy * physics_dt;
-
-        // Floor collision (if it ever gets that low)
-        if (b->y + r > floor_y) {
-            b->y = floor_y - r;
-            b->vy *= -restitution;
-        }
-
-        // --- Convert to board-local coordinates ---
-        float dx = b->x - pplat.cx;
-        float dy = b->y - pplat.cy;
-
-        float lx =  dx * c + dy * s;   // along the board
-        float ly = -dx * s + dy * c;   // normal to the board (negative = above)
-
-        // Is it horizontally above the board?
-        bool over_board = (fabsf(lx) <= halfL + r);
-
-        // Determine current stack height in this column
-        int column_height   = 0;   // # of boxes already stacked here
-        int top_box_index   = -1;  // which box is at the top in this column
-
-        for (int j = 0; j < num_boxes; j++) {
-            if (j == i) continue;
-            if (!boxes[j].on_board) continue;
-
-            if (fabsf(boxes[j].lx - lx) < STACK_BIN) {
-                // stack_level = 0 means directly on board
-                int candidate_height = boxes[j].stack_level + 1;
-                if (candidate_height > column_height) {
-                    column_height = candidate_height;
-                    top_box_index = j;
-                }
-            }
-        }
-
-
-                float ly_contact = -halfH - r - 2.0f * r * (float)column_height;
-
-        // Did we cross that surface while moving downward?
-        bool crossing_surface = (ly > ly_contact);
-        if (over_board && crossing_surface && (b->vy > 0.0f)) {
-            float vy_before = b->vy;
-
-            // // Snap onto top of this column
-            // b->on_board    = true;
-            // b->stack_level = column_height;
-            // b->lx          = lx;
-            // b->vx_local    = 0.0f;   // start with no sliding
-
-            b->on_board    = true;
-            b->stack_level = column_height;
-            b->lx          = lx;
-
-            // small random tangential speed so stacks don't remain perfectly rigid
-            float jitter = (rand_unit() - 0.5f) * 5.0f;   // between -2.5 and +2.5 (tune)
-            b->vx_local    = jitter;
-
-
-            // Decide what we're standing on:
-            if (column_height == 0) {
-                // directly on the board
-                b->support_type  = SUPPORT_BOARD;
-                b->support_index = -1;
-            } else {
-                // on top of another box
-                b->support_type  = SUPPORT_BOX;
-                b->support_index = top_box_index;
-            }
-
-            float ly_new = ly_contact;
-
-            float wx = lx * c - ly_new * s;
-            float wy = lx * s + ly_new * c;
-
-            b->x = pplat.cx + wx;
-            b->y = pplat.cy + wy;
-
-            // Stick to support: zero world velocities for now
-            b->vx    = 0.0f;
-            b->vy    = 0.0f;
-            b->angle = pplat.angle;
-
-
-
-            // Impact torque on board (same idea as your old code)
-            float hit_pos        = lx / halfL;   // -1..+1 along the board
-            float impact_speed   = fabsf(vy_before);
-            float torque_impulse = BOX_MASS * impact_speed * hit_pos * IMPACT_SCALE;
-            float delta_omega    = torque_impulse / BOARD_INERTIA;
-            pplat.omega         += delta_omega;
-        }
-    }
-
-    // 2) Continuous weight torque from all boxes sitting on the board
-    for (int i = 0; i < num_boxes; i++) {
-        if (!boxes[i].on_board) continue;
-
-        float lx = boxes[i].lx;  // lever arm along the board
-        float weight_torque = BOX_MASS * g * (lx / halfL) * STATIC_WEIGHT_SCALE;
-        float d_omega       = (weight_torque / BOARD_INERTIA) * physics_dt;
-        pplat.omega        += d_omega;
-    }
-
-    // 3) Board torsion spring around angle = 0 (return to center)
-    float torque = -spring_k * pplat.angle - damp * pplat.omega;
-    pplat.omega += torque * physics_dt;
-    pplat.angle += pplat.omega * physics_dt;
-
-    board_angle_deg = pplat.angle * 180.0f / 3.14159265f;
-}
-
-
-// ------------------End initialize physics state----------------------------
+// // User input thread
+// static PT_THREAD (protothread_serial(struct pt *pt))
+// {
+//     PT_BEGIN(pt) ;
+//     static int test_in ;
+//     static char mode;
+//     static float value;
+
+//     while(1) {
+//         sprintf(pt_serial_out_buffer, "change value (p, i, d, a):");
+//         serial_write ;
+//         // spawn a thread to do the non-blocking serial read
+//         serial_read ;
+//         // convert input string to number
+//         sscanf(pt_serial_in_buffer,"%c", &mode) ;
+        
+//         sprintf(pt_serial_out_buffer, "new value:");
+//         serial_write ;
+//         // spawn a thread to do the non-blocking serial read
+//         serial_read ;
+//         sscanf(pt_serial_in_buffer,"%f", &value) ;
+
+//         switch (mode)
+//         {
+//             case 'p':
+//                 proportion = float2fix15(value);
+//                 break;
+//             case 'i':
+//                 integral = float2fix15(value);
+//                 break;
+//             case 'd':
+//                 derivative = value;
+//                 break;
+//             case 'a':
+//                 angle = float2fix15(180 - value);
+//                 break;
+//             default: 
+//                 break;
+//         }
+
+//         update_display = true;
+
+//         //if (test_in > 50) continue ;
+//         //else if (test_in < -50) continue ;
+//         //else angle = int2fix15(test_in) ;
+//     }
+//     PT_END(pt) ;
+// }
+
+// static PT_THREAD (protothread_button(struct pt *pt))
+// {
+//     // Indicate start of thread
+//     PT_BEGIN(pt) ;
+
+//     while (true)
+//     {
+//         bool pressed = update_button_state();
+
+//         if (pressed)
+//         {
+//             printf("Starting sequence\n");
+//             angle = int2fix15(90);
+//             update_display = true;
+// 		    PT_YIELD_usec(5 * USEC_PER_SEC);
+//             printf("...\n");
+//             angle = int2fix15(60);
+//             update_display = true;
+// 		    PT_YIELD_usec(5 * USEC_PER_SEC);
+//             printf("...\n");
+//             angle = int2fix15(120);
+//             update_display = true;
+// 		    PT_YIELD_usec(5 * USEC_PER_SEC);
+//             printf("Finished\n");
+//             angle = int2fix15(90);
+//             update_display = true;
+//         }
+//         else
+//         {
+// 		    PT_YIELD_usec(1000);
+//         }
+//     }
+
+//     // Indicate end of thread
+//     PT_END(pt);
+// }
 
 // Thread that draws to VGA display
 static PT_THREAD (protothread_vga(struct pt *pt))
 {
     // Indicate start of thread
     PT_BEGIN(pt) ;
-
-    physics_init();
 
     // We will start drawing at column 81
     static int xcoord = 81 ;
@@ -636,38 +454,95 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     setTextColor2(WHITE, BLACK);
 
 
-    // spawnbox();
-    // Draw background + static board ONCE
-    // fillRect(0, 0, 640, 480, BLACK);
+    spawnbox();
+	
 
-    // drawBoard();
+    // // Draw bottom plot
+    // drawHLine(75, 430, 5, CYAN) ;
+    // drawHLine(75, 355, 5, CYAN) ;
+    // drawHLine(75, 280, 5, CYAN) ;
+    // drawVLine(80, 280, 150, CYAN) ;
+    // sprintf(screentext, "5000") ;
+    // setCursor(50, 280) ;
+    // writeString(screentext) ;
+    // sprintf(screentext, "0") ;
+    // setCursor(50, 425) ;
+    // writeString(screentext) ;
 
+    // // Draw top plot
+    // drawHLine(75, 230, 5, CYAN) ;
+    // drawHLine(75, 155, 5, CYAN) ;
+    // drawHLine(75, 80, 5, CYAN) ;
+    // drawVLine(80, 80, 150, CYAN) ;
+    // sprintf(screentext, "90") ;
+    // setCursor(50, 150) ;
+    // writeString(screentext) ;
+    // sprintf(screentext, "180") ;
+    // setCursor(45, 75) ;
+    // writeString(screentext) ;
+    // sprintf(screentext, "0") ;
+    // setCursor(45, 225) ;
+    // writeString(screentext) ;
     
 
     while (true) {
-        
-        // Step custom physics world
-        physics_step();
 
         fillRect(0, 0, 640, 480, BLACK);
-
-        // fillRect(0, 0, 640, 480, BLACK);
-
+        drawBoard();
         drawBoardPaddle();
-        // Draw the falling box from custom physics
-        int box_size = 20;
-        for (int i = 0; i < num_boxes; i++) {
-            drawBoxRotated(boxes[i].x, boxes[i].y, boxes[i].angle, box_size, WHITE);
-        }
-
-        // ~60 fps
-        // drawRect(300, 220, 40, 40, WHITE);
-        
-        // Simple frame pacing ~60 fps (16 ms) or others
-        PT_YIELD_usec(16000);
 
         // // Wait on semaphore
-        // PT_SEM_WAIT(pt, &vga_semaphore);
+        PT_SEM_WAIT(pt, &vga_semaphore);
+        // // Increment drawspeed controller
+        // throttle += 1 ;
+        // // If the controller has exceeded a threshold, draw
+        // if (throttle >= threshold) { 
+        //     // Zero drawspeed controller
+        //     throttle = 0 ;
+
+        //     // if (update_display)
+        //     {
+        //         update_display = false;
+        //         // fillRect(0, 0, 500, 75, BLACK);
+                
+        //         sprintf(screentext, "Actual angle: %.02f    ", fix2float15(accel_angle));
+        //         setCursor(30, 15);
+        //         writeString(screentext);
+        //         sprintf(screentext, "Target angle degrees: %.02f    ", fix2float15(angle));
+        //         setCursor(30, 30);
+        //         writeString(screentext);
+        //         sprintf(screentext, "Control duty cycle: %.02f    ", control_temp);
+        //         setCursor(30, 45);
+        //         writeString(screentext);
+
+        //         sprintf(screentext, "P: %.02f    ", fix2float15(proportion));
+        //         setCursor(250, 15);
+        //         writeString(screentext);
+        //         sprintf(screentext, "I: %.02f    ", fix2float15(integral));
+        //         setCursor(250, 30);
+        //         writeString(screentext);
+        //         sprintf(screentext, "D: %.02f    ", derivative);
+        //         setCursor(250, 45);
+        //         writeString(screentext);
+        //     }
+
+        //     // Erase a column
+        //     drawVLine(xcoord, 75, 480, BLACK) ;
+
+        //     // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
+        //     drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
+
+        //     // Draw top plot
+        //     drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
+        //     drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle)-90.0)*-2.5f)-OldMin)/OldRange)), RED) ;
+
+        //     // Update horizontal cursor
+        //     if (xcoord < 609) {
+        //         xcoord += 1 ;
+        //     }
+        //     else {
+        //         xcoord = 81 ;
+        //     }
            
         //}
     }
@@ -692,9 +567,6 @@ int main() {
 
     // Initialize stdio
     stdio_init_all();
-
-    // Seed PRNG once so rand() is different each boot
-    srand((unsigned int) time_us_32());
 
     printf("Starting\n");
 
