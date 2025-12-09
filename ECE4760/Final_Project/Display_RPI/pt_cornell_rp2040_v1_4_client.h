@@ -921,6 +921,7 @@ static PT_THREAD (pt_serialin_polled(struct pt *pt)){
         // NOTE this assumes a human is typing!!
         ch = uart_getc(UART_ID);
         PT_YIELD_UNTIL(pt, (int)uart_is_writable(UART_ID)) ;
+        printf("\033[5;%dH", pt_current_char_count+1) ;
         uart_putc(UART_ID, ch);
         // check for <enter> or <backspace>
         if (ch == '\r' ){

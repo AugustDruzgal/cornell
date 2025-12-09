@@ -12,7 +12,7 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico CACHE STRING "Board type")
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 
 # cmake version
 cmake_minimum_required(VERSION 3.13)
@@ -21,23 +21,45 @@ cmake_minimum_required(VERSION 3.13)
 include(pico_sdk_import.cmake)
 
 # give the project a name (anything you want)
-project(PWM_Demo C CXX ASM)
+project(Display_Device C CXX ASM)
 
 # initialize the sdk
 pico_sdk_init()
 
-add_executable(PWM_Demo)
+add_executable(Display_Device)
+
+target_sources(Display_Device PRIVATE main.c vga16_graphics_v2.c mpu6050.c)# client.c)
 
 # must match with pio filename and executable name from above
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/hsync.pio)
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/vsync.pio)
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/rgb.pio)
-
-# must match with executable name and source file names
-target_sources(PWM_Demo PRIVATE pwm-demo.c vga16_graphics_v2.c mpu6050.c)
+pico_generate_pio_header(Display_Device ${CMAKE_CURRENT_LIST_DIR}/hsync.pio)
+pico_generate_pio_header(Display_Device ${CMAKE_CURRENT_LIST_DIR}/vsync.pio)
+pico_generate_pio_header(Display_Device ${CMAKE_CURRENT_LIST_DIR}/rgb.pio)
 
 # Add pico_multicore which is required for multicore functionality
-target_link_libraries(PWM_Demo pico_stdlib pico_multicore pico_bootsel_via_double_reset hardware_pwm hardware_dma hardware_irq hardware_adc hardware_pio hardware_i2c hardware_clocks)
+target_link_libraries(Display_Device 
+    pico_stdlib 
+    pico_multicore 
+    pico_bootsel_via_double_reset 
+    hardware_pwm 
+    hardware_dma 
+    hardware_irq 
+    hardware_adc 
+    hardware_pio 
+    hardware_i2c 
+    hardware_clocks
+    pico_sync
+    pico_btstack_ble
+    pico_btstack_cyw43
+    pico_cyw43_arch_none
+    hardware_sync)
+
+target_include_directories(Display_Device PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR} # For btstack config
+    )
+
+target_compile_definitions(Display_Device PRIVATE
+    RUNNING_AS_CLIENT=1
+)
 
 # create map/bin/hex file etc.
-pico_add_extra_outputs(PWM_Demo)
+pico_add_extra_outputs(Display_Device)
