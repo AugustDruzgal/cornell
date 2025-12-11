@@ -130,6 +130,8 @@ static int characteristic_a_val = 0 ;
 // We send data as formatted strings (just like a serial console)
 static char characteristic_a_tx[255] ;
 
+static void update_mag_value(void);
+
 // Heartbeat protothread
 static PT_THREAD (protothread_heartbeat(struct pt *pt))
 {
@@ -144,7 +146,7 @@ static PT_THREAD (protothread_heartbeat(struct pt *pt))
         characteristic_a_val += 1 ;
 
         // Update characteristic (sends to client if notifications enabled)
-        set_characteristic_a_value(characteristic_a_val) ;
+        // set_characteristic_a_value(characteristic_a_val) ;
 
         // Yield
         PT_YIELD_usec(500000) ;
@@ -201,13 +203,18 @@ void on_pwm_wrap() {
 
     counter++;
 
-    if (counter%100==0)
+    if (counter%200==0)
     {
-        set_characteristic_a_value(fix2float15(complementary_angle_x));
+        update_mag_value();
     }
 
     // Signal VGA to draw
     PT_SEM_SIGNAL(pt, &vga_semaphore);
+}
+
+static void update_mag_value(void)
+{
+    set_characteristic_a_value(fix2float15(complementary_angle_x));
 }
 
 // Serial input thread

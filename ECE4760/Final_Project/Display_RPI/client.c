@@ -45,6 +45,7 @@ char authen[] = "Signed write";
 char extended[] = "Extended";
 char * access_permissions[8] = {broadcast, read, write_no_resp, write, notify, indicate, authen, extended} ;
 
+static bool controller_connected = false;
 
 // Some human-readable names for states in our ATT state machine
 typedef enum {
@@ -561,6 +562,8 @@ static void hci_event_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                     if (state != TC_W4_CONNECT) return;
                     // Retrieve connection handle from packet
                     connection_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+
+                    controller_connected = true;
                     // initialize gatt client context with handle, and add it to the list of active clients
                     // query primary services
                     // Search for the custom service which was advertised
@@ -582,6 +585,7 @@ static void hci_event_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                 gatt_client_stop_listening_for_characteristic_value_updates(&notification_listener);
             }
             printf("Disconnected %s\n", bd_addr_to_str(server_addr));
+            controller_connected = false;
             // Turn off the LED to indicate disconnection to server
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
             // Initialize relevant variables
@@ -732,6 +736,11 @@ static PT_THREAD (protothread_ui(struct pt *pt))
     }
 
     PT_END(pt) ;
+}
+
+bool controller_is_connected(void)
+{
+    return controller_connected;
 }
 
 int bt_client_main(void) {

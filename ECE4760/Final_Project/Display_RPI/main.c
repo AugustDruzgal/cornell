@@ -34,6 +34,9 @@
 #define SCREEN_LEFT_X   5
 #define SCREEN_RIGHT_X  635
 
+#define SCREEN_CENTER_Y (SCREEN_TOP_Y + SCREEN_BOTTOM_Y)/2
+#define SCREEN_CENTER_X (SCREEN_LEFT_X + SCREEN_RIGHT_X)/2
+
 // Board geometry
 #define BOARD_WIDTH   300
 #define BOARD_HEIGHT  12
@@ -48,6 +51,62 @@
 #define GRID_COLS 15   // (BOARD_WIDTH / BOX_SIZE_PIX) = 300 / 20 = 15
 #define GRID_ROWS 12                             // tweakable
 
+#define GAME_OVER_TIME 5
+#define GAME_OVER_TIME_US GAME_OVER_TIME * 1000000
+
+#define TITLE "Block Stacker"
+#define TITLE_DRIFT_MAX_X 10
+#define TITLE_DRIFT_MAX_Y 5
+#define TITLE_DRIFT_RATE 0.05
+#define TITLE_TEXT_SIZE 5
+#define TITLE_COLOR YELLOW
+
+#define YOU_LOSE "YOU LOSE :("
+#define YOU_LOSE_DRIFT_MAX_X 10
+#define YOU_LOSE_DRIFT_MAX_Y 5
+#define YOU_LOSE_DRIFT_RATE 0.05
+#define YOU_LOSE_TEXT_SIZE 5
+#define YOU_LOSE_COLOR PINK
+
+#define GREETING_PHRASE_1 "The best game you will ever play!"
+#define GREETING_PHRASE_2 "What a time to be alive!"
+#define GREETING_PHRASE_3 "Time to stack those blocks!"
+#define GREETING_PHRASE_4 "Lookin' good today!"
+#define GREETING_PHRASE_5 "You are so cool!"
+#define GREETING_DRIFT_MAX_X 20
+#define GREETING_DRIFT_MAX_Y 5
+#define GREETING_DRIFT_RATE 0.08
+#define GREETING_TEXT_SIZE 5
+#define GREETING_COLOR DARK_ORANGE
+
+#define LOSING_PHRASE_1 "Have you tried getting good?"
+#define LOSING_PHRASE_2 "Toddlers can stack blocks, why can't you?"
+#define LOSING_PHRASE_3 "How are you so bad at this?"
+#define LOSING_PHRASE_4 "Do better next time!"
+#define LOSING_PHRASE_5 "That was super embarrassing"
+#define LOSING_DRIFT_MAX_X 20
+#define LOSING_DRIFT_MAX_Y 5
+#define LOSING_DRIFT_RATE 0.08
+#define LOSING_TEXT_SIZE 5
+
+#define CONTROLLER_PHRASE_1 "Connect your controller!"
+#define CONTROLLER_PHRASE_1_COLOR RED
+#define CONTROLLER_PHRASE_2 "Controller Connected"
+#define CONTROLLER_PHRASE_2_COLOR GREEN
+#define CONTROLLER_PHRASE_3 "Pick up your controller to start!"
+#define CONTROLLER_PHRASE_3_COLOR LIGHT_BLUE
+#define CONTROLLER_DRIFT_MAX_X 10
+#define CONTROLLER_DRIFT_MAX_Y 5
+#define CONTROLLER_DRIFT_RATE 0.03
+
+#define TIME_PHRASE_COLOR LIGHT_BLUE
+#define TIME_DRIFT_MAX_X 30
+#define TIME_DRIFT_MAX_Y 5
+#define TIME_DRIFT_RATE 0.1
+
+#define START_DELAY_MAX 5.0
+#define START_DELAY_MAX_US (uint64_t) (START_DELAY_MAX * 1000000)
+
 // Physics constants - not all used in the final version
 static const float BOX_GRAVITY         = 80.0f;   // pixels/s^2, downward (screen)
 static const float BOX_MASS            = 12.0f;
@@ -57,7 +116,7 @@ static const float BOARD_DAMP          = 1.5f;
 static const float STATIC_WEIGHT_SCALE = 14.0f;
 
 // Grid sliding parameters - not all used in the final version
-static const float GRID_SLIDE_SCALE = 0.4f;   // how strongly gravity along board moves pile
+static const float GRID_SLIDE_SCALE = 0.8f;   // how strongly gravity along board moves pile
 static const float GRID_FRICTION    = 0.99f;  // 0<GRID_FRICTION<=1, lower = more damping
 
 // Time step (matches PT_YIELD_usec(16000))
@@ -65,6 +124,16 @@ static const float PHYSICS_DT = 0.016f;
 
 // The angle of the device
 static float tilt_angle = 0.00f;
+
+static float c = 0;
+static float s = 0;
+
+static bool title_screen = false;
+static bool game_screen = false;
+static bool end_screen = false;
+
+// TODO: Add start delay after picking up the controller
+static uint64_t start_delay = START_DELAY_MAX_US;
 
 // Spawn timing (changeable)
 static const uint64_t SPAWN_INTERVAL_US = 1000000;  // 1 second
@@ -84,6 +153,17 @@ typedef struct {
     uint16_t color;
 } falling_box_t;
 
+// Spinning decoration block
+typedef struct _display_block{
+    float x, y;
+    float max_x_drift;
+    float max_y_drift;
+    float drift_rate;
+    float spin_rate;
+    uint16_t color;
+    uint16_t size;
+} display_block;
+
 // ---------------------------------------------------------
 // 1. ADDED PARAMETERS (as the code updated)
 // ---------------------------------------------------------
@@ -99,6 +179,10 @@ typedef struct _grid_location
 
 // Grid occupancy: true = there is a box in that cell
 static grid_location grid[GRID_COLS][GRID_ROWS];
+
+static char str_buf[64];
+static char *greeting_phrase;
+static char *losing_phrase;
 
 static float grid_offset_u = 0.0f;  // residual offset in [-BOX_SIZE_PIX, BOX_SIZE_PIX]
 static float grid_v        = 0.0f;  // velocity along board (u/s)
@@ -121,8 +205,8 @@ static float board_angle_deg = 15.0f; // initial angle in degrees
 // --------------------------
 // GAME STATES
 // --------------------------
-static const int   MAX_HEALTH_POINTS = 20;
-static int         health_points     = 20;
+#define MAX_HEALTH_POINTS 1
+static int         health_points     = MAX_HEALTH_POINTS;
 static bool        game_over         = false;
 static uint64_t    game_start_us     = 0;
 static float       final_time_s      = 0.0f;
@@ -158,9 +242,14 @@ static void drawRotatedRectOutline(int cx, int cy, int w, int h,
     drawLine(px[3],py[3], px[0],py[0], color);
 }
 
+static inline void hideBoardPaddle(float c, float s) {
+    drawRotatedRectOutline(BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT,
+                           c, s, BLACK);
+}
+
 static inline void drawBoardPaddle(float c, float s) {
     drawRotatedRectOutline(BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT,
-                           c, s, WHITE);
+                           c, s, LIGHT_BLUE);
 }
 
 static void drawBoxRotated(float x, float y, float c, float s,
@@ -258,7 +347,7 @@ uint16_t rand_color(void)
             rand_color = YELLOW;
             break;
         case 5:
-            rand_color = ORANGE;
+            rand_color = DARK_ORANGE;
             break;
     }
 
@@ -405,7 +494,7 @@ static void cleanup_grid(float c, float s) {
 // 5. MAIN PHYSICS ITERATIONS
 // ---------------------------------------------------------
 
-static void physics_step(float c, float s) {
+static void physics_step(void) {
     if (game_over) {
         // Freeze physics when game is over
         return;
@@ -533,8 +622,11 @@ static void physics_step(float c, float s) {
     pplat.omega += torque * PHYSICS_DT;
     pplat.angle += pplat.omega * PHYSICS_DT;
 
+    float error = (pplat.angle - tilt_angle * DEGtoRAD) * 0.7f;
+    pplat.angle -= error;
+
     // This will need to be changed to a torque
-    pplat.angle = tilt_angle * DEGtoRAD;
+    // pplat.angle = tilt_angle * DEGtoRAD;
 
     // Clamp board angle to +/- 30 degrees
     const float max_angle_rad = 30.0f * DEGtoRAD;
@@ -547,122 +639,647 @@ static void physics_step(float c, float s) {
     cleanup_grid(c, s);
 }
 
+char *get_random_greeting_phrase(void)
+{
+    uint16_t rand_greeting = rand()%3;
+
+    switch (rand_greeting)
+    {
+        case 0:
+            return GREETING_PHRASE_1;
+
+        case 1:
+            return GREETING_PHRASE_2;
+            
+        case 2:
+            return GREETING_PHRASE_3;
+    }
+}
+
+char *get_random_losing_phrase(void)
+{
+    uint16_t rand_losing = rand()%3;
+
+    switch (rand_losing)
+    {
+        case 0:
+            return LOSING_PHRASE_1;
+
+        case 1:
+            return LOSING_PHRASE_2;
+            
+        case 2:
+            return LOSING_PHRASE_3;
+    }
+}
+
+void display_main_screen(uint64_t time_left)
+{
+    static uint64_t display_drift = 0;
+    static double title_display_offset_x = 0.0;
+    static double title_display_offset_y = 0.0;
+    static double greeting_display_offset_x = 0.0;
+    static double greeting_display_offset_y = 0.0;
+    static double controller_display_offset_x = 0.0;
+    static double controller_display_offset_y = 0.0;
+    static double controller_display2_offset_x = 0.0;
+    static double controller_display2_offset_y = 0.0;
+    static double time_display_offset_x = 0.0;
+    static double time_display_offset_y = 0.0;
+    static bool last_controller = false;
+    static uint64_t last_time = 0;
+    
+    display_drift += 1;
+    
+    while(gpio_get(VSYNC)){};
+
+    // Clear the old title
+    setTextColor2(BLACK, BLACK);
+    setTextSize(5);
+    int print_width = strlen(TITLE) * (5 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + title_display_offset_x, SCREEN_CENTER_Y - 50 + title_display_offset_y);
+    writeString(TITLE);
+    
+    // Update the display drift
+    title_display_offset_x = sin(display_drift * TITLE_DRIFT_RATE) * TITLE_DRIFT_MAX_X;
+    title_display_offset_y = cos(display_drift * TITLE_DRIFT_RATE) * TITLE_DRIFT_MAX_Y;
+    
+    // Write the title
+    setTextColor2(YELLOW, BLACK);
+    setTextSize(5);
+    print_width = strlen(TITLE) * (5 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + title_display_offset_x, SCREEN_CENTER_Y - 50 + title_display_offset_y);
+    writeString(TITLE);
+    
+    while(gpio_get(VSYNC)){};
+
+    // Clear the old greeting
+    setTextColor2(BLACK, BLACK);
+    setTextSize(2);
+    print_width = strlen(greeting_phrase) * (2 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + greeting_display_offset_x, SCREEN_CENTER_Y + 10 + greeting_display_offset_y);
+    writeString(greeting_phrase);
+    
+    // Update the greeting drift
+    greeting_display_offset_x = sin(display_drift * GREETING_DRIFT_RATE) * GREETING_DRIFT_MAX_X;
+    greeting_display_offset_y = cos(display_drift * GREETING_DRIFT_RATE) * GREETING_DRIFT_MAX_Y;
+    
+    // Write the greeting
+    setTextColor2(DARK_ORANGE, BLACK);
+    setTextSize(2);
+    print_width = strlen(greeting_phrase) * (2 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + greeting_display_offset_x, SCREEN_CENTER_Y + 10 + greeting_display_offset_y);
+    writeString(greeting_phrase);
+    
+    while(gpio_get(VSYNC)){};
+
+    // Clear the old controller prompt
+    setTextColor2(BLACK, BLACK);
+
+    if (last_controller == false)
+    {
+        setTextSize(2);
+        print_width = strlen(CONTROLLER_PHRASE_1) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display_offset_x, SCREEN_CENTER_Y + 40 + controller_display_offset_y);
+        writeString(CONTROLLER_PHRASE_1);
+    }
+    else
+    {
+        setTextSize(2);
+        print_width = strlen(CONTROLLER_PHRASE_2) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display_offset_x, SCREEN_CENTER_Y + 40 + controller_display_offset_y);
+        writeString(CONTROLLER_PHRASE_2);
+        
+        print_width = strlen(CONTROLLER_PHRASE_3) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display2_offset_x, SCREEN_CENTER_Y + 70 + controller_display2_offset_y);
+        writeString(CONTROLLER_PHRASE_3);
+    }
+
+    // Update the controller prompt drift
+    controller_display_offset_x = sin(display_drift * CONTROLLER_DRIFT_RATE) * CONTROLLER_DRIFT_MAX_X;
+    controller_display_offset_y = cos(display_drift * CONTROLLER_DRIFT_RATE) * CONTROLLER_DRIFT_MAX_Y;
+    controller_display2_offset_x = sin(display_drift * CONTROLLER_DRIFT_RATE + 12345) * CONTROLLER_DRIFT_MAX_X;
+    controller_display2_offset_y = cos(display_drift * CONTROLLER_DRIFT_RATE + 12345) * CONTROLLER_DRIFT_MAX_Y;
+    last_controller = controller_is_connected();
+    
+    // Write the controller prompt
+    if (last_controller == false)
+    {
+        setTextColor2(CONTROLLER_PHRASE_1_COLOR, BLACK);
+        setTextSize(2);
+        print_width = strlen(CONTROLLER_PHRASE_1) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display_offset_x, SCREEN_CENTER_Y + 40 + controller_display_offset_y);
+        writeString(CONTROLLER_PHRASE_1);
+    }
+    else
+    {
+        setTextColor2(CONTROLLER_PHRASE_2_COLOR, BLACK);
+        setTextSize(2);
+        print_width = strlen(CONTROLLER_PHRASE_2) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display_offset_x, SCREEN_CENTER_Y + 40 + controller_display_offset_y);
+        writeString(CONTROLLER_PHRASE_2);
+        
+        setTextColor2(CONTROLLER_PHRASE_3_COLOR, BLACK);
+        print_width = strlen(CONTROLLER_PHRASE_3) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + controller_display2_offset_x, SCREEN_CENTER_Y + 70 + controller_display2_offset_y);
+        writeString(CONTROLLER_PHRASE_3);
+    }
+    
+    while(gpio_get(VSYNC)){};
+
+    if (last_time != 0)
+    {
+        setTextColor2(BLACK, BLACK);
+        setTextSize(2);
+
+        float seconds_to_start = (((float) last_time)/1000000);
+
+        sprintf(str_buf, "Starting in: %.1fs", seconds_to_start);
+        print_width = strlen(str_buf) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + time_display_offset_x, SCREEN_CENTER_Y + 100 + time_display_offset_y);
+        writeString(str_buf);
+    }
+
+    last_time = time_left;
+    time_display_offset_x = sin(display_drift * TIME_DRIFT_RATE) * TIME_DRIFT_MAX_X;
+    time_display_offset_y = cos(display_drift * TIME_DRIFT_RATE) * TIME_DRIFT_MAX_Y;
+
+    if (last_time != 0)
+    {
+        setTextColor2(TIME_PHRASE_COLOR, BLACK);
+        setTextSize(2);
+
+        float seconds_to_start = (((float) last_time)/1000000);
+
+        sprintf(str_buf, "Starting in: %.1fs", seconds_to_start);
+        print_width = strlen(str_buf) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + time_display_offset_x, SCREEN_CENTER_Y + 100 + time_display_offset_y);
+        writeString(str_buf);
+    }
+}
+
+
+void display_losing_screen(uint64_t time_left)
+{
+    static uint64_t display_drift = 0;
+    static double title_display_offset_x = 0.0;
+    static double title_display_offset_y = 0.0;
+    static double losing_display_offset_x = 0.0;
+    static double losing_display_offset_y = 0.0;
+    static double time_display_offset_x = 0.0;
+    static double time_display_offset_y = 0.0;
+    static bool last_controller = false;
+    static uint64_t last_time = 0;
+    
+    display_drift += 1;
+    
+    while(gpio_get(VSYNC)){};
+
+    // Clear the old title
+    setTextColor2(BLACK, BLACK);
+    setTextSize(5);
+    int print_width = strlen(YOU_LOSE) * (5 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + title_display_offset_x, SCREEN_CENTER_Y - 30 + title_display_offset_y);
+    writeString(YOU_LOSE);
+    
+    // Update the display drift
+    title_display_offset_x = sin(display_drift * TITLE_DRIFT_RATE) * TITLE_DRIFT_MAX_X;
+    title_display_offset_y = cos(display_drift * TITLE_DRIFT_RATE) * TITLE_DRIFT_MAX_Y;
+    
+    // Write the title
+    setTextColor2(YOU_LOSE_COLOR, BLACK);
+    setTextSize(5);
+    print_width = strlen(YOU_LOSE) * (5 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + title_display_offset_x, SCREEN_CENTER_Y - 30 + title_display_offset_y);
+    writeString(YOU_LOSE);
+    
+    while(gpio_get(VSYNC)){};
+
+    // Clear the old greeting
+    setTextColor2(BLACK, BLACK);
+    setTextSize(2);
+    print_width = strlen(losing_phrase) * (2 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + losing_display_offset_x, SCREEN_CENTER_Y + 30 + losing_display_offset_y);
+    writeString(losing_phrase);
+    
+    // Update the greeting drift
+    losing_display_offset_x = sin(display_drift * LOSING_DRIFT_RATE) * LOSING_DRIFT_MAX_X;
+    losing_display_offset_y = cos(display_drift * LOSING_DRIFT_RATE) * LOSING_DRIFT_MAX_Y;
+    
+    // Write the losing message
+    setTextColor2(RED, BLACK);
+    setTextSize(2);
+    print_width = strlen(losing_phrase) * (2 * 6);
+    setCursor(SCREEN_CENTER_X - print_width/2 + losing_display_offset_x, SCREEN_CENTER_Y + 30 + losing_display_offset_y);
+    writeString(losing_phrase);
+    
+    while(gpio_get(VSYNC)){};
+
+    if (last_time != 0)
+    {
+        setTextColor2(BLACK, BLACK);
+        setTextSize(2);
+
+        float seconds_to_start = (((float) last_time)/1000000);
+
+        sprintf(str_buf, "Restarting in: %.1fs", seconds_to_start);
+        print_width = strlen(str_buf) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + time_display_offset_x, SCREEN_CENTER_Y + 60 + time_display_offset_y);
+        writeString(str_buf);
+    }
+
+    last_time = time_left;
+    time_display_offset_x = sin(display_drift * TIME_DRIFT_RATE) * TIME_DRIFT_MAX_X;
+    time_display_offset_y = cos(display_drift * TIME_DRIFT_RATE) * TIME_DRIFT_MAX_Y;
+
+    if (last_time != 0)
+    {
+        setTextColor2(TIME_PHRASE_COLOR, BLACK);
+        setTextSize(2);
+
+        float seconds_to_start = (((float) last_time)/1000000);
+
+        sprintf(str_buf, "Restarting in: %.1fs", seconds_to_start);
+        print_width = strlen(str_buf) * (2 * 6);
+        setCursor(SCREEN_CENTER_X - print_width/2 + time_display_offset_x, SCREEN_CENTER_Y + 60 + time_display_offset_y);
+        writeString(str_buf);
+    }
+}
+
+void create_display_block(display_block *block, float x, float y, float max_x_drift, float max_y_drift, float drift_rate, float spin_rate, uint16_t color, uint16_t size)
+{
+    block->x = x;
+    block->y = y;
+    block->max_x_drift = max_x_drift;
+    block->max_y_drift = max_y_drift;
+    block->drift_rate = drift_rate;
+    block->spin_rate = spin_rate;
+    block->color = color;
+    block->size = size;
+}
+
+static display_block title_blocks[16];
+static display_block game_blocks[4];
+static display_block end_blocks[16];
+
+void init_spinning_blocks(void)
+{
+    float x_off;
+    float y_off;
+    float spin_rate;
+    float drift_rate;
+    float max_x_drift;
+    float max_y_drift;
+    uint16_t size;
+
+    for (float i = 0; i < 16; i = i + 1)
+    {
+        x_off = sin((1 + 2 * i) * (3.141592/16)) * 280;
+        y_off = cos((1 + 2 * i) * (3.141592/16)) * 175;
+
+        drift_rate = 0.03 + ((float) (rand()%1000)) * 0.00007;
+        spin_rate = 0.03 + ((float) (rand()%1000)) * 0.00007;
+
+        max_x_drift = 7 + (rand() % 5);
+        max_y_drift = 7 + (rand() % 5);
+
+        size = 17 + (rand() % 7);
+
+        create_display_block(&title_blocks[(int) i], ((int) SCREEN_CENTER_X + x_off), ((int) SCREEN_CENTER_Y + y_off), max_x_drift, max_y_drift, drift_rate, spin_rate, rand_color(), size);
+    }
+    
+    for (float i = 0; i < 8; i = i + 1)
+    {
+        x_off = sin((1 + 2 * i) * (3.141592/8)) * 280;
+        y_off = cos((1 + 2 * i) * (3.141592/8)) * 175;
+
+        drift_rate = 0.03 + ((float) (rand()%1000)) * 0.00007;
+        spin_rate = 0.03 + ((float) (rand()%1000)) * 0.00007;
+
+        max_x_drift = 7 + (rand() % 5);
+        max_y_drift = 7 + (rand() % 5);
+
+        size = 17 + (rand() % 7);
+
+        create_display_block(&end_blocks[(int) i], ((int) SCREEN_CENTER_X + x_off), ((int) SCREEN_CENTER_Y + y_off), max_x_drift, max_y_drift, drift_rate, spin_rate, rand_color(), size);
+    }
+}
+
+void display_spinning_blocks(void)
+{
+    static uint64_t accum = 123456;
+
+    if (title_screen)
+    {
+        while(gpio_get(VSYNC)){};
+
+        // Clear the title screen blocks
+        for (int i = 0; i < 16; i++)
+        {
+            display_block *block = &title_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, BLACK);
+        }
+        
+        accum += 1; 
+
+        // Display the title screen blocks
+        for (int i = 0; i < 16; i++)
+        {
+            display_block *block = &title_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, block->color);
+        }
+    }
+    else if (end_screen)
+    {
+        while(gpio_get(VSYNC)){};
+
+        // Clear the end screen blocks
+        for (int i = 0; i < 16; i++)
+        {
+            display_block *block = &end_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, BLACK);
+        }
+        
+        accum += 1; 
+
+        // Display the end screen blocks
+        for (int i = 0; i < 16; i++)
+        {
+            display_block *block = &end_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, block->color);
+        }
+    }
+    else if (game_screen)
+    {
+        return;
+        while(gpio_get(VSYNC)){};
+
+        // Clear the game screen blocks
+        for (int i = 0; i < 4; i++)
+        {
+            display_block *block = &game_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, BLACK);
+        }
+        
+        accum += 1; 
+
+        // Display the game screen blocks
+        for (int i = 0; i < 4; i++)
+        {
+            display_block *block = &game_blocks[i];
+
+            float x_off = sin(accum * block->drift_rate) * block->max_x_drift;
+            float y_off = cos(accum * block->drift_rate) * block->max_y_drift;
+
+            float c = cos(accum * block->spin_rate);
+            float s = sin(accum * block->spin_rate);
+
+            drawBoxRotated(block->x + x_off, block->y + y_off, c, s, block->size, block->color);
+        }
+    }
+}
+
 // ---------------------------------------------------------
 // 6. PROTOTHREAD: VGA DRAW
 // ---------------------------------------------------------
-
 static PT_THREAD (protothread_vga(struct pt *pt))
 {
     PT_BEGIN(pt);
 
-    physics_init();
+    init_spinning_blocks();
 
-    setTextSize(1);
-    setTextColor2(WHITE, BLACK);
+    static uint64_t begin_time;
+    static uint64_t spare_time;
 
-    while (true) {
+    while (true)
+    {
+        fillRect(0, 0, 640, 480, BLACK);
 
-        float c     = cosf(pplat.angle);
-        float s     = sinf(pplat.angle);
-        // Step physics
-        physics_step(c, s);
+        greeting_phrase = get_random_greeting_phrase();
+        losing_phrase = get_random_losing_phrase();
+        start_delay = START_DELAY_MAX;
 
-        // Clear screen
-        // fillRect(0, 0, 640, 480, BLACK);
-        // Clear only the play area, not the whole 640x480
-        fillRect(100, 0, 530, 450, BLACK); //More efficient way to do this?
+        title_screen = true;
+        end_screen = false;
+        game_screen = false;
 
+        while (true)
+        {
+            while (true)
+            {
+                begin_time = time_us_64();
 
-        // Optional borders
-        // drawBoardBounds();
+                display_main_screen(0);
+                display_spinning_blocks();
 
-        // Draw snapped grid boxes (white)
-        
+                if (controller_is_connected() && abs((int) tilt_angle) > 10)
+                {
+                    break;
+                }
 
-        // Draw board
-        drawBoardPaddle(c, s);
+                spare_time = 16000 - (time_us_64() - begin_time);
 
-        
-        float halfL = 0.5f * (float)BOARD_WIDTH;
-        float halfH = 0.5f * (float)BOARD_HEIGHT;
+                PT_YIELD_usec(spare_time);
+            }
+            
+            uint64_t pickup_time_us = time_us_64();
 
-        for (int col = 0; col < GRID_COLS; col++) {
-            for (int row = 0; row < GRID_ROWS; row++) {
-                if (!grid[col][row].occupied) continue;
-                float x, y;
-                grid_cell_world_center(col, row, &x, &y, c, s, halfL, halfH);
-                drawBoxRotated(x, y, c, s, BOX_SIZE_PIX-1, grid[col][row].color);
+            while (controller_is_connected())
+            {   
+                uint64_t now_us = time_us_64();
+                begin_time = time_us_64();
+
+                if (now_us - pickup_time_us > START_DELAY_MAX_US || !controller_is_connected())
+                {
+                    break;
+                }
+
+                display_main_screen(START_DELAY_MAX_US - (now_us - pickup_time_us));
+                display_spinning_blocks();
+                
+                spare_time = 16000 - (time_us_64() - begin_time);
+
+                PT_YIELD_usec(spare_time);
+            }
+
+            if (controller_is_connected())
+            {
+                break;
             }
         }
 
-        // Draw falling boxes (red, axis-aligned)
-        for (int i = 0; i < MAX_FALLING; i++) {
-            if (!falling[i].active) continue;
-            drawBoxRotated(falling[i].x, falling[i].y, 1.0f, 0.0f, BOX_SIZE_PIX-1, falling[i].color);
-        }
+        title_screen = false;
+        game_screen = true;
 
-        // ----------------------------
-        // Health bar + Timer
-        // ----------------------------
-        char buf[64];
+        fillRect(0, 0, 640, 480, BLACK);
 
-        // Time since game started
-        float elapsed_s;
-        if (!game_over) {
-            uint64_t now_us = time_us_64();
-            if (game_start_us == 0) game_start_us = now_us;
-            elapsed_s = (now_us - game_start_us) / 1000000.0f;
-        } else {
-            elapsed_s = final_time_s;
-        }
-
-        setCursor(SCREEN_LEFT_X + 10, SCREEN_TOP_Y + 10);
-        sprintf(buf, "Time: %.1fs", elapsed_s);
-        writeString(buf);
+        physics_init();
         
-        setCursor(SCREEN_LEFT_X + 10, SCREEN_TOP_Y + 20);
-        sprintf(buf, "Angle: %.1f deg", tilt_angle);
-        writeString(buf);
+        c = cosf(pplat.angle);
+        s = sinf(pplat.angle);
 
-        // Health bar on the far right
-        int bar_x = SCREEN_RIGHT_X - 20;
-        int bar_y = SCREEN_TOP_Y + 40;
-        int bar_w = 10;
-        int bar_h = 200;
-
-        // Bar border
-        drawRect(bar_x, bar_y, bar_w, bar_h, WHITE);
-
-        // Filled portion (from bottom up)
-        if (health_points > 0) {
-            float frac = (float)health_points / (float)MAX_HEALTH_POINTS;
-            int filled = (int)(frac * (bar_h - 2));   // leave border
-
-            if (filled < 0) filled = 0;
-            if (filled > bar_h - 2) filled = bar_h - 2;
-
-            int fy = bar_y + (bar_h - 1 - filled);
-            fillRect(bar_x + 1, fy, bar_w - 2, filled, GREEN);
-        }
-
-        // HP label
-        setCursor(SCREEN_RIGHT_X - 70, SCREEN_TOP_Y + 20);
-        sprintf(buf, "HP: %2d", health_points);
-        writeString(buf);
-
-        // Game over message
-        if (game_over) {
-            setCursor(SCREEN_RIGHT_X - 140, SCREEN_BOTTOM_Y - 40);
-            writeString("YOU LOSE!");
-
-            setCursor(SCREEN_RIGHT_X - 220, SCREEN_BOTTOM_Y - 20);
-            sprintf(buf, "Time spent in game: %.1fs", final_time_s);
-            writeString(buf);
-        }
-
+        setTextSize(1);
+        setTextColor2(WHITE, BLACK);
+            
+        float halfL = 0.5f * (float)BOARD_WIDTH;
+        float halfH = 0.5f * (float)BOARD_HEIGHT;
         
-        // ~60 fps
-        PT_YIELD_usec(16000);
+        while (true)
+        {
+            begin_time = time_us_64();
+            while(gpio_get(VSYNC)){};
+            // Hide board
+            hideBoardPaddle(c, s);
+            
+            for (int col = 0; col < GRID_COLS; col++) {
+                for (int row = 0; row < GRID_ROWS; row++) {
+                    if (!grid[col][row].occupied) continue;
+                    float x, y;
+                    grid_cell_world_center(col, row, &x, &y, c, s, halfL, halfH);
+                    drawBoxRotated(x, y, c, s, BOX_SIZE_PIX-1, BLACK);
+                }
+            }
+
+            // Hide falling boxes (red, axis-aligned)
+            for (int i = 0; i < MAX_FALLING; i++) {
+                if (!falling[i].active) continue;
+                drawBoxRotated(falling[i].x, falling[i].y, 1.0f, 0.0f, BOX_SIZE_PIX-1, BLACK);
+            }
+
+            c = cosf(pplat.angle);
+            s = sinf(pplat.angle);
+
+            // Step physics
+            physics_step();
+
+            for (int col = 0; col < GRID_COLS; col++) {
+                for (int row = 0; row < GRID_ROWS; row++) {
+                    if (!grid[col][row].occupied) continue;
+                    float x, y;
+                    grid_cell_world_center(col, row, &x, &y, c, s, halfL, halfH);
+                    drawBoxRotated(x, y, c, s, BOX_SIZE_PIX-1, grid[col][row].color);
+                }
+            }
+
+            // Draw falling boxes (red, axis-aligned)
+            for (int i = 0; i < MAX_FALLING; i++) {
+                if (!falling[i].active) continue;
+                drawBoxRotated(falling[i].x, falling[i].y, 1.0f, 0.0f, BOX_SIZE_PIX-1, falling[i].color);
+            }
+            
+            // Draw board
+            drawBoardPaddle(c, s);
+
+            // ----------------------------
+            // Health bar + Timer
+            // ----------------------------
+
+            // Time since game started
+            float elapsed_s;
+            if (!game_over) {
+                uint64_t now_us = time_us_64();
+                if (game_start_us == 0) game_start_us = now_us;
+                elapsed_s = (now_us - game_start_us) / 1000000.0f;
+            } else {
+                elapsed_s = final_time_s;
+            }
+
+            setCursor(SCREEN_LEFT_X + 10, SCREEN_TOP_Y + 10);
+            sprintf(str_buf, "Time: %.1fs", elapsed_s);
+            writeString(str_buf);
+
+            // Health bar on the far right
+            int bar_x = SCREEN_RIGHT_X - 20;
+            int bar_y = SCREEN_TOP_Y + 40;
+            int bar_w = 10;
+            int bar_h = 200;
+
+            // Bar border
+            drawRect(bar_x, bar_y, bar_w, bar_h, WHITE);
+
+            // Filled portion (from bottom up)
+            if (health_points > 0) {
+                float frac = (float)health_points / (float)MAX_HEALTH_POINTS;
+                int filled = (int)(frac * (bar_h - 2));   // leave border
+
+                if (filled < 0) filled = 0;
+                if (filled > bar_h - 2) filled = bar_h - 2;
+
+                int fy = bar_y + (bar_h - 1 - filled);
+                fillRect(bar_x + 1, fy, bar_w - 2, filled, GREEN);
+            }
+
+            // HP label
+            setCursor(SCREEN_RIGHT_X - 70, SCREEN_TOP_Y + 20);
+            sprintf(str_buf, "HP: %2d", health_points);
+            writeString(str_buf);
+            
+            // Decorative blocks for game screen
+            display_spinning_blocks();
+
+            // Game over message
+            if (game_over)
+            {
+                game_screen = false;
+                end_screen = true;
+
+                fillRect(0, 0, 640, 480, BLACK);
+
+                uint64_t game_over_time_us = time_us_64();
+                uint64_t now_time_us = time_us_64();
+
+                while (now_time_us <= game_over_time_us + GAME_OVER_TIME_US)
+                {
+                    display_losing_screen(GAME_OVER_TIME_US - (now_time_us - game_over_time_us));
+                    display_spinning_blocks();
+                    
+                    PT_YIELD_usec(16000);
+                    now_time_us = time_us_64();
+                }
+                
+                game_over = false;
+                break;
+            }
+
+            printf("Spare time: %d\n", spare_time);
+
+            PT_YIELD_usec(spare_time);
+        }
     }
 
     PT_END(pt);
