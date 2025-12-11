@@ -12,8 +12,8 @@
 #include "pico/stdlib.h"
 #include "pico/sync.h"
 #include "hardware/sync.h"
-#include "pt_cornell_rp2040_v1_4_client.h"
 #include "main.h"
+#include "music.c"
 
 // Show/conceal debugging information
 #if 0

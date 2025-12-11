@@ -1082,6 +1082,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     PT_BEGIN(pt);
 
     init_spinning_blocks();
+    set_song(SONG_MENU);
 
     static uint64_t begin_time;
     static uint64_t spare_time;
@@ -1145,6 +1146,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 
         title_screen = false;
         game_screen = true;
+        set_song(SONG_GAME);
 
         fillRect(0, 0, 640, 480, BLACK);
 
@@ -1257,6 +1259,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
             {
                 game_screen = false;
                 end_screen = true;
+                set_song(SONG_MENU);
 
                 fillRect(0, 0, 640, 480, BLACK);
 
@@ -1310,6 +1313,8 @@ int main() {
     srand((unsigned int) time_us_32());
 
     initVGA();
+
+    music_init();
 
     multicore_reset_core1();
     multicore_launch_core1(core1_entry);

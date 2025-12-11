@@ -140,16 +140,11 @@ static PT_THREAD (protothread_heartbeat(struct pt *pt))
     // Buffer for writing counter to VGA
     static char countval[20] ;
 
-    while(1) {
+    while(1) 
+    {
+        update_mag_value();
 
-        // Increment the counter
-        characteristic_a_val += 1 ;
-
-        // Update characteristic (sends to client if notifications enabled)
-        // set_characteristic_a_value(characteristic_a_val) ;
-
-        // Yield
-        PT_YIELD_usec(500000) ;
+        PT_YIELD_usec(100000) ;
     }
 
     PT_END(pt) ;
@@ -197,16 +192,6 @@ void on_pwm_wrap() {
     // Complementary angle (degrees - 15.16 fixed point)
     complementary_angle_x = multfix15(complementary_angle_x - gyro_angle_delta_x, zeropt999) - multfix15(accel_angle_x, zeropt001);
     complementary_angle_y = multfix15(complementary_angle_y + gyro_angle_delta_y, zeropt999) - multfix15(accel_angle_y, zeropt001);
-
-    // printf("Value: %f", fix2float15(complementary_angle_x));
-    static int counter = 0;
-
-    counter++;
-
-    if (counter%200==0)
-    {
-        update_mag_value();
-    }
 
     // Signal VGA to draw
     PT_SEM_SIGNAL(pt, &vga_semaphore);
@@ -449,8 +434,8 @@ int main() {
     // multicore_launch_core1(core1_entry);
 
     pt_add_thread(protothread_ble);
-    pt_add_thread(protothread_serial);
-    // pt_add_thread(protothread_heartbeat) ;
+    // pt_add_thread(protothread_serial);
+    pt_add_thread(protothread_heartbeat) ;
     pt_sched_method = SCHED_ROUND_ROBIN ;
     pt_schedule_start ;
 }
