@@ -182,14 +182,20 @@ void on_pwm_wrap() {
     // SMALL ANGLE APPROXIMATION
     accel_angle_x = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
     accel_angle_y = multfix15(divfix(acceleration[0], acceleration[2]), oneeightyoverpi) ;
+    accel_angle_x = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
+    accel_angle_y = multfix15(divfix(acceleration[0], acceleration[2]), oneeightyoverpi) ;
     // NO SMALL ANGLE APPROXIMATION
     // accel_angle = multfix15(float2fix15(atan2(-filtered_ax, filtered_ay) + PI), oneeightyoverpi);
 
     // Gyro angle delta (measurement times timestep) (15.16 fixed point)
     gyro_angle_delta_x = multfix15(gyro[0], zeropt001) ;
     gyro_angle_delta_y = multfix15(gyro[1], zeropt001) ;
+    gyro_angle_delta_x = multfix15(gyro[0], zeropt001) ;
+    gyro_angle_delta_y = multfix15(gyro[1], zeropt001) ;
 
     // Complementary angle (degrees - 15.16 fixed point)
+    complementary_angle_x = multfix15(complementary_angle_x - gyro_angle_delta_x, zeropt999) - multfix15(accel_angle_x, zeropt001);
+    complementary_angle_y = multfix15(complementary_angle_y + gyro_angle_delta_y, zeropt999) - multfix15(accel_angle_y, zeropt001);
     complementary_angle_x = multfix15(complementary_angle_x - gyro_angle_delta_x, zeropt999) - multfix15(accel_angle_x, zeropt001);
     complementary_angle_y = multfix15(complementary_angle_y + gyro_angle_delta_y, zeropt999) - multfix15(accel_angle_y, zeropt001);
 
@@ -285,6 +291,9 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     setCursor(50, 150) ;
     writeString(screentext) ;
     sprintf(screentext, "-90") ;
+    setCursor(50, 150) ;
+    writeString(screentext) ;
+    sprintf(screentext, "-90") ;
     setCursor(45, 225) ;
     writeString(screentext) ;
     
@@ -303,8 +312,10 @@ static PT_THREAD (protothread_vga(struct pt *pt))
                 // fillRect(0, 0, 500, 75, BLACK);
                 
                 sprintf(screentext, "Angle around X axis: %.02f    ", fix2float15(complementary_angle_x));
+                sprintf(screentext, "Angle around X axis: %.02f    ", fix2float15(complementary_angle_x));
                 setCursor(30, 15);
                 writeString(screentext);
+                sprintf(screentext, "Angle around Y axis: %.02f    ", fix2float15(complementary_angle_y));
                 sprintf(screentext, "Angle around Y axis: %.02f    ", fix2float15(complementary_angle_y));
                 setCursor(30, 30);
                 writeString(screentext);
@@ -315,8 +326,12 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 
             // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
             // drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
+            // drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
 
             // Draw top plot
+            // drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_x))*-2.5f)-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_y))*-2.5f)-OldMin)/OldRange)), BLUE) ;
             // drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
             drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_x))*-2.5f)-OldMin)/OldRange)), RED) ;
             drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_y))*-2.5f)-OldMin)/OldRange)), BLUE) ;
