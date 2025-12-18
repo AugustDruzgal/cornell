@@ -116,7 +116,7 @@ static const float BOARD_DAMP          = 1.5f;
 static const float STATIC_WEIGHT_SCALE = 14.0f;
 
 // Grid sliding parameters - not all used in the final version
-static const float GRID_SLIDE_SCALE = 0.8f;   // how strongly gravity along board moves pile
+static const float GRID_SLIDE_SCALE = 1.0f;   // how strongly gravity along board moves pile
 static const float GRID_FRICTION    = 0.99f;  // 0<GRID_FRICTION<=1, lower = more damping
 
 // Time step (matches PT_YIELD_usec(16000))
@@ -205,7 +205,7 @@ static float board_angle_deg = 15.0f; // initial angle in degrees
 // --------------------------
 // GAME STATES
 // --------------------------
-#define MAX_HEALTH_POINTS 1
+#define MAX_HEALTH_POINTS 5
 static int         health_points     = MAX_HEALTH_POINTS;
 static bool        game_over         = false;
 static uint64_t    game_start_us     = 0;
@@ -1165,6 +1165,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
         {
             begin_time = time_us_64();
             while(gpio_get(VSYNC)){};
+
             // Hide board
             hideBoardPaddle(c, s);
             
