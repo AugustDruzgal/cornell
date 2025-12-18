@@ -12,7 +12,7 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico CACHE STRING "Board type")
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 
 # cmake version
 cmake_minimum_required(VERSION 3.13)
@@ -21,23 +21,49 @@ cmake_minimum_required(VERSION 3.13)
 include(pico_sdk_import.cmake)
 
 # give the project a name (anything you want)
-project(PWM_Demo C CXX ASM)
+project(Project_Device C CXX ASM)
 
 # initialize the sdk
 pico_sdk_init()
 
-add_executable(PWM_Demo)
+add_executable(Project_Device)
+
+target_sources( Project_Device
+                PRIVATE
+                main.c
+                VGA/vga16_graphics_v2.c
+                MPU6050/mpu6050.c)
 
 # must match with pio filename and executable name from above
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/hsync.pio)
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/vsync.pio)
-pico_generate_pio_header(PWM_Demo ${CMAKE_CURRENT_LIST_DIR}/rgb.pio)
+pico_generate_pio_header(Project_Device ${CMAKE_CURRENT_LIST_DIR}/VGA/hsync.pio)
+pico_generate_pio_header(Project_Device ${CMAKE_CURRENT_LIST_DIR}/VGA/vsync.pio)
+pico_generate_pio_header(Project_Device ${CMAKE_CURRENT_LIST_DIR}/VGA/rgb.pio)
 
-# must match with executable name and source file names
-target_sources(PWM_Demo PRIVATE pwm-demo.c vga16_graphics_v2.c mpu6050.c)
+target_link_libraries(Project_Device
+    pico_stdlib
+    pico_sync
+    pico_btstack_ble
+    pico_btstack_cyw43
+    pico_cyw43_arch_none
+    pico_bootsel_via_double_reset
+    hardware_irq
+    hardware_spi
+    hardware_timer
+    hardware_sync
+    hardware_pio
+    hardware_dma
+    hardware_pwm
+    hardware_adc
+    hardware_i2c
+    hardware_clocks
+    pico_multicore
+    )
 
-# Add pico_multicore which is required for multicore functionality
-target_link_libraries(PWM_Demo pico_stdlib pico_multicore pico_bootsel_via_double_reset hardware_pwm hardware_dma hardware_irq hardware_adc hardware_pio hardware_i2c hardware_clocks)
+target_include_directories(Project_Device PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR} # For btstack config
+    )
+
+pico_btstack_make_gatt_header(Project_Device PRIVATE "${CMAKE_CURRENT_LIST_DIR}/GATT_Service/server_demo_gattfile.gatt")
 
 # create map/bin/hex file etc.
-pico_add_extra_outputs(PWM_Demo)
+pico_add_extra_outputs(Project_Device)

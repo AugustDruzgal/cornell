@@ -39,10 +39,31 @@
 #include "hardware/i2c.h"
 #include "hardware/clocks.h"
 
+#include <stdio.h>
+#include <math.h>
+
+// BTstack
+#include "btstack.h"
+
+// High-level libraries
+#include "pico/cyw43_arch.h"
+#include "pico/btstack_cyw43.h"
+#include "pico/sync.h"
+
 // Include custom libraries
-#include "vga16_graphics_v2.h"
-#include "mpu6050.h"
-#include "pt_cornell_rp2040_v1_4.h"
+#include "VGA/vga16_graphics_v2.h"
+#include "MPU6050/mpu6050.h"
+
+// Hardware API's
+#include "hardware/timer.h"
+#include "hardware/irq.h"
+#include "hardware/spi.h"
+#include "hardware/sync.h"
+#include "hardware/clocks.h"
+
+// GAP and GATT
+#include "GAP_Advertisement/gap_config.h"
+#include "GATT_Service/service_implementation.h"
 
 // Arrays in which raw measurements will be stored
 fix15 acceleration[3], gyro[3];
@@ -96,6 +117,52 @@ fix15 accel_angle_y = int2fix15(0);
 fix15 gyro_angle_delta_y = int2fix15(0);
 fix15 complementary_angle_y = int2fix15(0);
 
+// Period with which we'll enter the BTstack timer callback
+#define HEARTBEAT_PERIOD_MS 250
+
+// BTstack objects
+static btstack_timer_source_t heartbeat;
+static btstack_packet_callback_registration_t hci_event_callback_registration;
+
+// Some data that we will communicate over Bluetooth
+static int characteristic_a_val = 0 ;
+
+// We send data as formatted strings (just like a serial console)
+static char characteristic_a_tx[255] ;
+
+static void update_mag_value(void);
+
+// Heartbeat protothread
+static PT_THREAD (protothread_heartbeat(struct pt *pt))
+{
+    PT_BEGIN(pt) ;
+
+    // Buffer for writing counter to VGA
+    static char countval[20] ;
+
+    while(1) 
+    {
+        update_mag_value();
+
+        PT_YIELD_usec(100000) ;
+    }
+
+    PT_END(pt) ;
+}
+
+// Protothread that handles received Bluetooth data
+static PT_THREAD (protothread_ble(struct pt *pt))
+{
+    PT_BEGIN(pt);
+
+    while(1) {
+        // Wait for a bluetooth event (signaled by bluetooth write callback)
+        PT_SEM_SDK_WAIT(pt, &BLUETOOTH_READY) ;
+    }
+
+  PT_END(pt);
+}
+
 // PWM interrupt service routine
 void on_pwm_wrap() {
     // Clear the interrupt flag that brought us here
@@ -115,14 +182,20 @@ void on_pwm_wrap() {
     // SMALL ANGLE APPROXIMATION
     accel_angle_x = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
     accel_angle_y = multfix15(divfix(acceleration[0], acceleration[2]), oneeightyoverpi) ;
+    accel_angle_x = multfix15(divfix(acceleration[1], acceleration[2]), oneeightyoverpi) ;
+    accel_angle_y = multfix15(divfix(acceleration[0], acceleration[2]), oneeightyoverpi) ;
     // NO SMALL ANGLE APPROXIMATION
     // accel_angle = multfix15(float2fix15(atan2(-filtered_ax, filtered_ay) + PI), oneeightyoverpi);
 
     // Gyro angle delta (measurement times timestep) (15.16 fixed point)
     gyro_angle_delta_x = multfix15(gyro[0], zeropt001) ;
     gyro_angle_delta_y = multfix15(gyro[1], zeropt001) ;
+    gyro_angle_delta_x = multfix15(gyro[0], zeropt001) ;
+    gyro_angle_delta_y = multfix15(gyro[1], zeropt001) ;
 
     // Complementary angle (degrees - 15.16 fixed point)
+    complementary_angle_x = multfix15(complementary_angle_x - gyro_angle_delta_x, zeropt999) - multfix15(accel_angle_x, zeropt001);
+    complementary_angle_y = multfix15(complementary_angle_y + gyro_angle_delta_y, zeropt999) - multfix15(accel_angle_y, zeropt001);
     complementary_angle_x = multfix15(complementary_angle_x - gyro_angle_delta_x, zeropt999) - multfix15(accel_angle_x, zeropt001);
     complementary_angle_y = multfix15(complementary_angle_y + gyro_angle_delta_y, zeropt999) - multfix15(accel_angle_y, zeropt001);
 
@@ -130,35 +203,30 @@ void on_pwm_wrap() {
     PT_SEM_SIGNAL(pt, &vga_semaphore);
 }
 
-// User input thread
-static PT_THREAD (protothread_serial(struct pt *pt))
+static void update_mag_value(void)
 {
-    PT_BEGIN(pt) ;
-    static int test_in ;
-    static char mode;
-    static float value;
-
-    while(1) {
-        sprintf(pt_serial_out_buffer, "change value (p, i, d, a):");
-        serial_write ;
-        // spawn a thread to do the non-blocking serial read
-        serial_read ;
-        // convert input string to number
-        sscanf(pt_serial_in_buffer,"%c", &mode) ;
-        
-        sprintf(pt_serial_out_buffer, "new value:");
-        serial_write ;
-        // spawn a thread to do the non-blocking serial read
-        serial_read ;
-        sscanf(pt_serial_in_buffer,"%f", &value) ;
-
-        //if (test_in > 50) continue ;
-        //else if (test_in < -50) continue ;
-        //else angle = int2fix15(test_in) ;
-    }
-    PT_END(pt) ;
+    set_characteristic_a_value(fix2float15(complementary_angle_x));
 }
 
+// Serial input thread
+static PT_THREAD (protothread_serial(struct pt *pt))
+{
+    PT_BEGIN(pt);
+
+      while(1)
+      {
+        // print prompt
+        sprintf(pt_serial_out_buffer, "Input a string: ");
+        // spawn a thread to do the non-blocking write
+        serial_write ;
+        // spawn a thread to do the non-blocking serial read
+        serial_read ;
+      } // END WHILE(1)
+
+  PT_END(pt);
+} // timer thread
+
+/*
 static PT_THREAD (protothread_button(struct pt *pt))
 {
     // Indicate start of thread
@@ -174,7 +242,9 @@ static PT_THREAD (protothread_button(struct pt *pt))
     // Indicate end of thread
     PT_END(pt);
 }
+*/
 
+/*
 // Thread that draws to VGA display
 static PT_THREAD (protothread_vga(struct pt *pt))
 {
@@ -221,6 +291,9 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     setCursor(50, 150) ;
     writeString(screentext) ;
     sprintf(screentext, "-90") ;
+    setCursor(50, 150) ;
+    writeString(screentext) ;
+    sprintf(screentext, "-90") ;
     setCursor(45, 225) ;
     writeString(screentext) ;
     
@@ -239,8 +312,10 @@ static PT_THREAD (protothread_vga(struct pt *pt))
                 // fillRect(0, 0, 500, 75, BLACK);
                 
                 sprintf(screentext, "Angle around X axis: %.02f    ", fix2float15(complementary_angle_x));
+                sprintf(screentext, "Angle around X axis: %.02f    ", fix2float15(complementary_angle_x));
                 setCursor(30, 15);
                 writeString(screentext);
+                sprintf(screentext, "Angle around Y axis: %.02f    ", fix2float15(complementary_angle_y));
                 sprintf(screentext, "Angle around Y axis: %.02f    ", fix2float15(complementary_angle_y));
                 setCursor(30, 30);
                 writeString(screentext);
@@ -251,8 +326,12 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 
             // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
             // drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
+            // drawPixel(xcoord, 430 - (int)(NewRange*((float)((((float)(control-2500))/10)-OldMin)/OldRange)), WHITE) ;
 
             // Draw top plot
+            // drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_x))*-2.5f)-OldMin)/OldRange)), RED) ;
+            drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_y))*-2.5f)-OldMin)/OldRange)), BLUE) ;
             // drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(angle)-90.0)*-2.5f)-OldMin)/OldRange)), GREEN) ;
             drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_x))*-2.5f)-OldMin)/OldRange)), RED) ;
             drawPixel(xcoord, 230 - (int)(NewRange*((float)(((fix2float15(complementary_angle_y))*-2.5f)-OldMin)/OldRange)), BLUE) ;
@@ -270,11 +349,12 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     // Indicate end of thread
     PT_END(pt);
 }
+*/
 
 // Entry point for core 1
 void core1_entry() {
-    pt_add_thread(protothread_vga) ;
-    pt_add_thread(protothread_button) ;
+    // pt_add_thread(protothread_vga) ;
+// pt_add_thread(protothread_button) ;
     pt_schedule_start ;
 }
 
@@ -289,7 +369,34 @@ int main() {
     printf("Starting\n");
 
     // Initialize VGA
-    initVGA() ;
+    // initVGA() ;
+
+    // initialize CYW43 driver architecture (will enable BT if/because CYW43_ENABLE_BLUETOOTH == 1)
+    if (cyw43_arch_init()) {
+        printf("failed to initialise cyw43_arch\n");
+        return -1;
+    }
+
+    // Initialize L2CAP and security manager
+    l2cap_init();
+    sm_init();
+
+    // Initialize ATT server, no general read/write callbacks
+    // because we'll set one up for each service
+    att_server_init(profile_data, NULL, NULL);   
+
+    // Instantiate our custom service handler
+    custom_service_server_init() ;
+
+    // inform about BTstack state
+    hci_event_callback_registration.callback = &packet_handler;
+    hci_add_event_handler(&hci_event_callback_registration);
+
+    // register for ATT event
+    att_server_register_packet_handler(packet_handler);
+
+    // turn on bluetooth!
+    hci_power_control(HCI_POWER_ON);
 
     ////////////////////////////////////////////////////////////////////////
     ///////////////////////// I2C CONFIGURATION ////////////////////////////
@@ -338,10 +445,12 @@ int main() {
     ///////////////////////////// ROCK AND ROLL ////////////////////////////
     ////////////////////////////////////////////////////////////////////////
     // start core 1 
-    multicore_reset_core1();
-    multicore_launch_core1(core1_entry);
+    // multicore_reset_core1();
+    // multicore_launch_core1(core1_entry);
 
-    pt_add_thread(protothread_serial) ;
+    pt_add_thread(protothread_ble);
+    // pt_add_thread(protothread_serial);
+    pt_add_thread(protothread_heartbeat) ;
+    pt_sched_method = SCHED_ROUND_ROBIN ;
     pt_schedule_start ;
-
 }
